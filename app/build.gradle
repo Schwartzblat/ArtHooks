@@ -1,0 +1,49 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+android {
+    // The demo lives in its own package now that the library owns com.arthooks, so R is
+    // com.example.arthooks.R and needs no import. applicationId is unchanged, so the adb commands
+    // in the README still name com.arthooks.
+    namespace 'com.example.arthooks'
+    compileSdk {
+        version = release(36)
+    }
+
+
+    defaultConfig {
+        applicationId "com.arthooks"
+        minSdk 33
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags ''
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            optimization {
+                enable false
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+}
+
+dependencies {
+    implementation project(':arthooks')
+    implementation libs.appcompat
+    implementation libs.material
+}

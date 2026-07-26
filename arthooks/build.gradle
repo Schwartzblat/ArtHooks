@@ -1,0 +1,80 @@
+plugins {
+    alias(libs.plugins.android.library)
+    id 'maven-publish'
+}
+
+android {
+    namespace 'com.arthooks'
+    compileSdk {
+        version = release(36)
+    }
+
+    defaultConfig {
+        minSdk 33
+
+        // Kept by consumers even with R8 on: the layout probes and the native declarations have to
+        // survive by exact name, and so does anything an app hooks.
+        consumerProguardFiles 'consumer-rules.pro'
+
+        externalNativeBuild {
+            cmake {
+                cppFlags ''
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            optimization {
+                enable false
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
+}
+
+publishing {
+    publications {
+        release(MavenPublication) {
+            groupId = 'com.arthooks'
+            artifactId = 'arthooks'
+            version = project.findProperty('arthooksVersion') ?: '0.1.0'
+
+            afterEvaluate {
+                from components.release
+            }
+
+            pom {
+                name = 'ArtHooks'
+                description = 'A minimal ART method-hooking library for Android.'
+                licenses {
+                    // No licence has been chosen for this project yet; add one here when it is.
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = 'GitHubPackages'
+            url = uri(project.findProperty('gprUrl')
+                    ?: "https://maven.pkg.github.com/${System.getenv('GITHUB_REPOSITORY') ?: 'OWNER/REPO'}")
+            credentials {
+                username = project.findProperty('gprUser') ?: System.getenv('GITHUB_ACTOR')
+                password = project.findProperty('gprKey') ?: System.getenv('GITHUB_TOKEN')
+            }
+        }
+    }
+}

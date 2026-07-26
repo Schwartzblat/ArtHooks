@@ -1,0 +1,110 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and check symbols
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the library and the demo
+        run: ./gradlew :arthooks:assembleRelease :app:assembleDebug
+
+      # JNI binds by mangled symbol name, and a rename fails silently until the method is called.
+      - name: Check JNI symbols
+        run: ./tools/check-jni-symbols.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arthooks-aar
+          path: arthooks/build/outputs/aar/*.aar
+          if-no-files-found: error
+
+  self-test:
+    name: self-test on API ${{ matrix.api-level }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # 33 is minSdk; 36 is what the library has been verified against on hardware. Both run
+        # x86_64, so this is also the only coverage the x86_64 trampoline gets.
+        api-level: [33, 36]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # KVM is what makes the x86_64 emulator usable on a GitHub runner.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the self-test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: ./tools/run-selftest.sh
+
+  publish:
+    name: publish to GitHub Packages
+    needs: [build, self-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Publish
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          ./gradlew :arthooks:publishReleasePublicationToGitHubPackagesRepository \
+            -ParthooksVersion="${GITHUB_REF_NAME#v}"
