@@ -159,12 +159,12 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:0.1.0'
+    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.1'
 }
 ```
 
 The group is the *repository* and the artifact is the *module*, because this is a multi-module
-build — `com.github.Schwartzblat:ArtHooks:0.1.0`, the single-module form, will not resolve.
+build — `com.github.Schwartzblat:ArtHooks:1.0.1`, the single-module form, will not resolve.
 
 Any git tag works as a version, and so does `main-SNAPSHOT` for the tip of the branch. The first
 request for a given tag makes JitPack build it, which takes a few minutes and can fail; the log is
@@ -196,7 +196,7 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.arthooks:arthooks:0.1.0'
+    implementation 'com.arthooks:arthooks:1.0.1'
 }
 ```
 
@@ -243,7 +243,7 @@ Push a tag. That is the whole procedure — there is no publish step here, and n
 configure, because JitPack builds the tag on its own machines the first time someone asks for it.
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
 Then open `https://jitpack.io/#Schwartzblat/ArtHooks` and hit **Get it** on the tag to make JitPack
