@@ -80,14 +80,16 @@ jobs:
           disable-animations: true
           script: ./tools/run-selftest.sh
 
-  publish:
-    name: publish to GitHub Packages
+  # Releases are built by JitPack from a git tag, not from here -- see jitpack.yml. This job does
+  # not publish anything; it runs the exact command JitPack will run, so a tag that JitPack cannot
+  # build fails here first, where the log is readable.
+  publish-dry-run:
+    name: dry-run the JitPack build
     needs: [build, self-test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -100,11 +102,12 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Publish
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+      - name: Publish locally under the JitPack coordinate
         run: |
-          ./gradlew :arthooks:publishReleasePublicationToGitHubPackagesRepository \
-            -ParthooksVersion="${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#v}"
+          ./gradlew :arthooks:publishToMavenLocal \
+            -Pgroup="com.github.${GITHUB_REPOSITORY/\//.}" -Pversion="$version"
+          published=~/.m2/repository/com/github/${GITHUB_REPOSITORY//\//\/}/arthooks/"$version"
+          ls -l "$published"
+          test -f "$published/arthooks-$version.aar"
+          test -f "$published/arthooks-$version.pom"

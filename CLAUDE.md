@@ -22,7 +22,9 @@ arthooks/consumer-rules.pro                        # R8 rules shipped to consume
 app/src/main/java/com/example/arthooks/            # demo app + tests, see below
 app/src/main/cpp/selftest.cpp                      # demo-only: a JNI method for the tests to hook
 tools/                                             # self-test runner, JNI symbol check
-.github/workflows/build.yml                        # build + symbol check + emulator self-test + publish
+.github/workflows/build.yml                        # build + symbol check + emulator self-test
+jitpack.yml                                        # how JitPack builds a tagged release
+LICENSE                                            # GPL-3.0
 ```
 
 Each translation unit owns its own state as file-local statics — there is no shared globals header.
@@ -60,8 +62,49 @@ adb logcat -s HookSelfTest  # self-test verdict; takes ~6s after launch to finis
 to aim at; it is loaded by `DispatchCases`, not by `ArtHooks`.
 
 Gradle 9.4.1 / AGP 9.2.1, Java toolchain 26, configuration cache enabled. Native code is built by
-CMake via `externalNativeBuild`; there is no NDK version pin, so the installed default is used.
+CMake via `externalNativeBuild`; `ndkVersion` is pinned to 28.2.13676358 in both modules so
+JitPack can pre-install it.
 `local.properties` (`sdk.dir`) is untracked and machine-local.
+
+## Publishing
+
+Releases go through **JitPack**, which builds a git tag on its own machines the first time a
+consumer asks for it. Consumers get `com.github.Schwartzblat.ArtHooks:arthooks:<tag>` -- group is
+the repo, artifact is the module, because this is a multi-module build. Nothing is published from
+here and there are no credentials anywhere; pushing the tag is the entire release.
+
+Four things make that work, and each is easy to undo by accident:
+
+- **`group` and `version` come from `providers.gradleProperty(...)`, not `findProperty(...)`.**
+  JitPack drives the build with `-Pgroup=com.github.<user>.<repo> -Pversion=<tag>`, so the build
+  script has to honour those. `findProperty('group')` cannot be used: `group` and `version` are also
+  built-in project properties, pre-seeded with the root project's name and the string
+  `"unspecified"`, so it never returns null and a `?:` fallback never fires -- the symptom is
+  artifacts silently published under group `ArtHooks`. `providers.gradleProperty()` sees only what
+  `-P` or `gradle.properties` actually supplied.
+- **They are set on the project, not just inside the publication.** A consumer using
+  `includeBuild()` substitutes on the project's own `group:name` and fails with
+  `Could not find com.arthooks:arthooks:` if the coordinates live only in the publication.
+- **`ndkVersion` is pinned in both modules.** `jitpack.yml` pre-installs exactly that NDK with
+  `sdkmanager`; an unpinned default would leave the build machine guessing. It is AGP 9.2.1's own
+  default, so pinning changed nothing locally.
+- **`jitpack.yml` deliberately has no `install:` command.** JitPack's default already runs
+  `publishToMavenLocal` with the right `-Pgroup`/`-Pversion`; overriding it would mean hard-coding
+  the coordinate. The file only picks the launcher JVM and pre-installs the NDK and CMake.
+
+The `jdk:` in `jitpack.yml` is only the JVM that launches the Gradle wrapper. Gradle then provisions
+its own daemon JVM (26) from the URLs in `gradle/gradle-daemon-jvm.properties`, so the two do not
+have to match.
+
+The `publish-dry-run` CI job runs JitPack's exact command on a `v*` tag and asserts the AAR and POM
+land under the right coordinate. It publishes nothing -- it exists so a tag JitPack cannot build
+fails somewhere with a readable log.
+
+`android.builtInKotlin=false` in `gradle.properties` keeps AGP 9 from putting a `kotlin-stdlib`
+dependency in the POM. There is no Kotlin here, and without it every consumer inherits the stdlib.
+
+The project is GPL-3.0 (`LICENSE`), which the POM declares. That is copyleft: an app linking this
+must ship its own source under a compatible licence.
 
 ## How the hook works
 
@@ -133,10 +176,10 @@ method they expect. Copying those fields instead breaks both.
   *callee's* entry sequence, and the hook redirects before it runs; the caller does not participate,
   so nothing here can fix it. `hook_function` logs a warning. Marking the replacement `synchronized`
   is only right for instance targets — a `static synchronized` method locks its declaring class, so
-  a `static synchronized` replacement locks the wrong object. `DispatchCases` asserts the monitor is
-  not held, and logs a `NOTE:` line recording whether reaching the original body through the backup
-  re-enters the locking. That NOTE has not been observed on a device yet; resolve it and turn it
-  into an assertion.
+  a `static synchronized` replacement locks the wrong object. Calling through the backup *does*
+  re-acquire it — the snapshot still carries `ACC_SYNCHRONIZED`, so ART's entry sequence locks the
+  receiver — so the unprotected window is only the replacement's own code. `DispatchCases` asserts
+  both halves.
 - **Trampoline codegen in `trampoline.cpp` is per-ABI and all four are built.** Only arm64 is exercised
   on a real device here; the arm/x86/x86_64 encodings were checked against the NDK assembler. If you
   touch them, verify the emitted bytes disassemble to the intended instructions rather than eyeballing

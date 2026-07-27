@@ -1,0 +1,19 @@
+# How JitPack builds this repo. https://jitpack.io/docs/BUILDING/
+#
+# Consumers get com.github.Schwartzblat.ArtHooks:arthooks:<tag> -- the group is the repo, the
+# artifact is the module, because this is a multi-module build.
+#
+# There is deliberately no `install:` command here. JitPack's default already runs
+# publishToMavenLocal with -Pgroup= and -Pversion= set to the coordinate it intends to serve, and
+# arthooks/build.gradle honours both. Overriding it would mean hard-coding those values.
+
+# Only the JVM that launches the Gradle wrapper. Gradle then provisions its own daemon JVM (26)
+# from the URLs in gradle/gradle-daemon-jvm.properties, so this does not have to match the toolchain.
+jdk:
+  - openjdk17
+
+# The library is mostly C++, so the build needs an NDK and CMake, not just the Android SDK. These
+# are large; if a JitPack build times out, this is the first place to look.
+before_install:
+  - yes | sdkmanager --licenses > /dev/null 2>&1 || true
+  - sdkmanager --install "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null

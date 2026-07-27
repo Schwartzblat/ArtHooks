@@ -3,11 +3,29 @@ plugins {
     id 'maven-publish'
 }
 
+// Set on the project, not just on the publication, for two reasons: a consumer that pulls this
+// module in with settings.gradle's includeBuild() substitutes by the project's own group:name and
+// would not find it otherwise, and JitPack drives the build with -Pgroup=... -Pversion=..., which
+// only takes effect if the build script honours those properties rather than hard-coding.
+//
+// providers.gradleProperty() and not findProperty(): `group` and `version` are also built-in
+// project properties, pre-seeded with the root project's name and "unspecified", so findProperty()
+// never returns null for them and a `?:` fallback would never fire. gradleProperty() sees only what
+// gradle.properties or -P actually supplied.
+group = providers.gradleProperty('group').getOrElse('com.arthooks')
+version = providers.gradleProperty('arthooksVersion')
+        .orElse(providers.gradleProperty('version'))
+        .getOrElse('0.1.0')
+
 android {
     namespace 'com.arthooks'
     compileSdk {
         version = release(36)
     }
+
+    // Pinned so a build machine can install exactly this NDK ahead of time -- jitpack.yml does,
+    // and an unpinned default would leave it guessing. This is AGP 9.2.1's own default.
+    ndkVersion '28.2.13676358'
 
     defaultConfig {
         minSdk 33
@@ -48,9 +66,9 @@ android {
 publishing {
     publications {
         release(MavenPublication) {
-            groupId = 'com.arthooks'
+            groupId = project.group
             artifactId = 'arthooks'
-            version = project.findProperty('arthooksVersion') ?: '0.1.0'
+            version = project.version
 
             afterEvaluate {
                 from components.release
@@ -59,21 +77,20 @@ publishing {
             pom {
                 name = 'ArtHooks'
                 description = 'A minimal ART method-hooking library for Android.'
-                licenses {
-                    // No licence has been chosen for this project yet; add one here when it is.
-                }
-            }
-        }
-    }
+                url = 'https://github.com/Schwartzblat/ArtHooks'
 
-    repositories {
-        maven {
-            name = 'GitHubPackages'
-            url = uri(project.findProperty('gprUrl')
-                    ?: "https://maven.pkg.github.com/${System.getenv('GITHUB_REPOSITORY') ?: 'OWNER/REPO'}")
-            credentials {
-                username = project.findProperty('gprUser') ?: System.getenv('GITHUB_ACTOR')
-                password = project.findProperty('gprKey') ?: System.getenv('GITHUB_TOKEN')
+                licenses {
+                    license {
+                        name = 'GNU General Public License v3.0'
+                        url = 'https://www.gnu.org/licenses/gpl-3.0.txt'
+                        distribution = 'repo'
+                    }
+                }
+
+                scm {
+                    connection = 'scm:git:git://github.com/Schwartzblat/ArtHooks.git'
+                    url = 'https://github.com/Schwartzblat/ArtHooks'
+                }
             }
         }
     }

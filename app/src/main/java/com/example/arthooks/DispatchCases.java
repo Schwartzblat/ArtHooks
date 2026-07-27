@@ -225,15 +225,15 @@ class DispatchCases {
             return fail("expected the monitor NOT to be held inside the replacement");
         }
 
-        // Whether reaching the original body *through the backup* re-enters ART's synchronized
-        // entry sequence is a property of the runtime, not of the hook, and it decides whether
-        // calling through restores the locking the hook dropped. Reported rather than asserted
-        // until it has been observed on a device.
-        Log.i(TAG, "NOTE: reached through the backup, the original body "
-                + (original_body_held_lock ? "DID hold" : "did NOT hold") + " the monitor");
+        // Calling through does restore it: the backup jumps to the snapshot's pre-hook entry point,
+        // and the snapshot still carries ACC_SYNCHRONIZED, so ART's entry sequence locks the
+        // receiver exactly as it would have. Only the replacement's own code runs unprotected.
+        if (!original_body_held_lock) {
+            return fail("expected the monitor to be held once the backup reached the original body");
+        }
 
-        return pass("synchronized target hooked -- and the monitor was NOT taken, "
-                + "because the lock lives in the replaced body");
+        return pass("synchronized target hooked -- the replacement did NOT hold the monitor, "
+                + "but calling through the backup did");
     }
 
     // --- helpers -------------------------------------------------------------------------------

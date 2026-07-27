@@ -43,7 +43,7 @@ adb logcat -d -s HookSelfTest:V | sed 's/^/  /'
 case "$verdict" in
     pass)
         echo
-        echo "self-test passed ($(adb logcat -d -s HookSelfTest:V | grep -c 'PASS:') PASS lines)"
+        echo "self-test passed"
         ;;
     fail)
         echo

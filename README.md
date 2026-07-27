@@ -24,7 +24,7 @@ trampoline encodings were verified by disassembling the emitted bytes against th
 |---|---|
 | Android | `minSdk` 33, `compileSdk`/`targetSdk` 36 |
 | ABIs | arm64-v8a, armeabi-v7a, x86_64, x86 |
-| Build | Gradle 9.4.1, AGP 9.2.1, JDK toolchain 26, CMake 3.22.1, NDK (installed default) |
+| Build | Gradle 9.4.1, AGP 9.2.1, JDK toolchain 26, CMake 3.22.1, NDK 28.2.13676358 |
 
 `ArtMethod` layout is measured at runtime rather than assumed, so the library is not pinned to a
 particular Android release — but it has only been run against API 36. See
@@ -137,25 +137,135 @@ identity survives: reflection, vtable and interface dispatch still see the metho
 
 `CLAUDE.md` has the details, including what breaks if you copy `ArtMethod` fields instead.
 
-## Installing
+## Using it in another project
 
-The library publishes as an AAR to GitHub Packages on tagged builds:
+The consumer needs `minSdk` 33 or higher, and nothing else — the AAR carries all four ABIs and has
+no transitive dependencies.
+
+Releases are served by [JitPack](https://jitpack.io/#Schwartzblat/ArtHooks), which builds them from
+a git tag. Add the repository, then the dependency:
 
 ```groovy
+// settings.gradle
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url 'https://jitpack.io' }
+    }
+}
+```
+
+```groovy
+// app/build.gradle
+dependencies {
+    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:0.1.0'
+}
+```
+
+The group is the *repository* and the artifact is the *module*, because this is a multi-module
+build — `com.github.Schwartzblat:ArtHooks:0.1.0`, the single-module form, will not resolve.
+
+Any git tag works as a version, and so does `main-SNAPSHOT` for the tip of the branch. The first
+request for a given tag makes JitPack build it, which takes a few minutes and can fail; the log is
+at `https://jitpack.io/com/github/Schwartzblat/ArtHooks/<tag>/build.log`.
+
+> **Licensing.** ArtHooks is GPL-3.0. Linking it into an app makes that app a derivative work, so
+> you must release your app's source under a GPL-compatible license. If you cannot do that, you
+> cannot use this library.
+
+### Maven Local
+
+Publish once from this repo, then resolve it like any other artifact:
+
+```bash
+./gradlew :arthooks:publishToMavenLocal          # -> ~/.m2/repository/com/arthooks/
+```
+
+```groovy
+// settings.gradle -- mavenLocal() must come first, it is not a default repository
+dependencyResolutionManagement {
+    repositories {
+        mavenLocal()
+        google()
+        mavenCentral()
+    }
+}
+```
+
+```groovy
+// app/build.gradle
 dependencies {
     implementation 'com.arthooks:arthooks:0.1.0'
 }
 ```
 
-`consumer-rules.pro` ships with it, so R8 will not rename the native declarations or drop the layout
-probes. It cannot protect *your* hooks — a hooked method, its replacement and its backup are located
-by exact name and signature, so keep them yourself.
+Republish after every change — Gradle caches the resolved artifact, so bump `arthooksVersion` or run
+the consumer with `--refresh-dependencies` if a rebuild appears to do nothing.
 
-Or build it locally:
+### A composite build, if you are changing the library too
+
+Point the consumer's `settings.gradle` at this checkout. Gradle substitutes the coordinate for the
+local project, so edits to the C++ or Java are picked up on the next build with no publish step:
+
+```groovy
+// settings.gradle
+includeBuild("/path/to/ArtHooks")
+```
+
+```groovy
+// app/build.gradle -- no version; the included build supplies it
+dependencies {
+    implementation 'com.arthooks:arthooks'
+}
+```
+
+### Just the file
 
 ```bash
-./gradlew :arthooks:assembleRelease            # AAR -> arthooks/build/outputs/aar/
-./gradlew :arthooks:publishToMavenLocal
+./gradlew :arthooks:assembleRelease              # -> arthooks/build/outputs/aar/
+```
+
+Copy `arthooks-release.aar` into the consumer's `app/libs/` and:
+
+```groovy
+dependencies {
+    implementation files('libs/arthooks-release.aar')
+}
+```
+
+This drops the POM, so nothing records the version — fine for a quick trial, worse for anything you
+have to reproduce later.
+
+### Cutting a release
+
+Push a tag. That is the whole procedure — there is no publish step here, and no credentials to
+configure, because JitPack builds the tag on its own machines the first time someone asks for it.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Then open `https://jitpack.io/#Schwartzblat/ArtHooks` and hit **Get it** on the tag to make JitPack
+build it immediately, rather than leaving the first consumer to wait.
+
+`jitpack.yml` controls that build: it selects the JVM that launches the Gradle wrapper, and
+pre-installs the NDK and CMake, without which the native half will not compile. `arthooks/build.gradle`
+reads `-Pgroup` and `-Pversion`, which is how JitPack injects the coordinate it intends to serve.
+
+The `v*` tag also runs a `publish-dry-run` CI job that executes JitPack's exact publish command and
+asserts the AAR and POM land under the right coordinate. It publishes nothing; it exists so a broken
+tag fails somewhere with a readable log instead of only inside JitPack.
+
+### R8
+
+`consumer-rules.pro` ships inside the AAR, so R8 will not rename the native declarations or drop the
+layout probes. It cannot protect *your* hooks: a hooked method, its replacement and its backup are
+located by exact name and signature, so keep them yourself.
+
+```proguard
+-keep class com.example.myapp.MyHook { *; }
+-keepclassmembers class com.example.myapp.TargetClass { *; }
 ```
 
 ## Building and running
@@ -193,9 +303,15 @@ runs both.
   `monitor-enter` in its body — the lock is acquired by the callee's own entry sequence, driven by
   `ACC_SYNCHRONIZED` on the method being entered. The hook redirects before any of that runs, into a
   replacement that does not carry the flag, so the lock is silently never taken and callers relying
-  on the target for mutual exclusion race. The library logs a warning at hook time. To restore it,
-  lock explicitly in the replacement — and note that marking the *replacement* `synchronized` is only
-  correct for instance targets:
+  on the target for mutual exclusion race. The library logs a warning at hook time.
+
+  **Calling through the backup does restore it.** The backup jumps to the snapshot's pre-hook entry
+  point, and the snapshot still carries `ACC_SYNCHRONIZED`, so ART's entry sequence locks the
+  receiver exactly as it would have — verified on device. The unprotected window is only the
+  replacement's own code, outside the call-through.
+
+  To close that window, lock explicitly. Marking the *replacement* `synchronized` is only correct for
+  instance targets:
 
   | Target | Correct in the replacement |
   |---|---|
@@ -229,3 +345,11 @@ arthooks/                                      # the library, published as an AA
 app/                                           # demo app and self-tests
 tools/                                         # self-test runner, JNI symbol check
 ```
+
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
+
+This is a copyleft license, and a library linked into an application makes that application a
+derivative work. An app that ships ArtHooks must therefore be distributed under a GPL-compatible
+license, with source available to its users. That rules out most closed-source applications.
