@@ -3,7 +3,10 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    # Both forms, because JitPack serves a tag under its literal name: tag "1.0.1" is version
+    # "1.0.1", but tag "v1.0.1" is version "v1.0.1". Bare semver is what you want; "v*" stays
+    # matched so an old-style tag still builds and releases instead of silently doing nothing.
+    tags: ['[0-9]*', 'v[0-9]*']
   pull_request:
   workflow_dispatch:
 
@@ -80,16 +83,17 @@ jobs:
           disable-animations: true
           script: ./tools/run-selftest.sh
 
-  # Releases are built by JitPack from a git tag, not from here -- see jitpack.yml. This job does
-  # not publish anything; it runs the exact command JitPack will run, so a tag that JitPack cannot
-  # build fails here first, where the log is readable.
-  publish-dry-run:
-    name: dry-run the JitPack build
+  # Turns a tag into an actual release: builds the artifacts under the coordinate JitPack will
+  # serve, attaches them to the GitHub release, and asks JitPack to build the tag so the Maven
+  # coordinate resolves immediately instead of on the first consumer's request.
+  release:
+    name: release ${{ github.ref_name }}
     needs: [build, self-test]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # Needed to create the release and upload assets. Everything else here is read-only.
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -102,12 +106,66 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Publish locally under the JitPack coordinate
+      - name: Work out the coordinate
+        id: coord
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          # A leading "v" is tolerated but stripped, so tag v1.0.1 and tag 1.0.1 both produce
+          # Maven version 1.0.1 in the attached artifacts. JitPack's own version is the raw tag.
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "group=com.github.${GITHUB_REPOSITORY/\//.}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the release artifacts
+        run: |
           ./gradlew :arthooks:publishToMavenLocal \
-            -Pgroup="com.github.${GITHUB_REPOSITORY/\//.}" -Pversion="$version"
-          published=~/.m2/repository/com/github/${GITHUB_REPOSITORY//\//\/}/arthooks/"$version"
-          ls -l "$published"
-          test -f "$published/arthooks-$version.aar"
-          test -f "$published/arthooks-$version.pom"
+            -Pgroup="${{ steps.coord.outputs.group }}" \
+            -Pversion="${{ steps.coord.outputs.version }}"
+
+      # Fails the release rather than publishing an empty one: the AAR and POM are the two files a
+      # consumer cannot do without.
+      - name: Collect and verify them
+        id: assets
+        run: |
+          version="${{ steps.coord.outputs.version }}"
+          staged="$HOME/.m2/repository/com/github/$GITHUB_REPOSITORY/arthooks/$version"
+
+          test -f "$staged/arthooks-$version.aar"
+          test -f "$staged/arthooks-$version.pom"
+
+          mkdir -p release-assets
+          cp "$staged"/arthooks-"$version"*.aar release-assets/
+          cp "$staged"/arthooks-"$version"*.pom release-assets/
+          cp "$staged"/arthooks-"$version"*-sources.jar release-assets/ 2>/dev/null || true
+
+          # Named explicitly rather than ./*, so a re-run cannot checksum the checksum file.
+          ( cd release-assets && sha256sum arthooks-* > SHA256SUMS.txt )
+          ls -l release-assets
+          cat release-assets/SHA256SUMS.txt
+
+      - name: Attach them to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          # The release may already exist -- created by hand, or by a re-run of this job.
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+          gh release upload "$tag" release-assets/* --clobber
+          gh release view "$tag"
+
+      # Best-effort: JitPack builds a tag lazily, on the first request for it. Asking here means the
+      # coordinate is live as soon as the tag is, rather than making the first consumer wait through
+      # a multi-minute build. Never fails the release -- the GitHub assets above are already
+      # published, and a consumer's own request would trigger the build anyway.
+      - name: Ask JitPack to build the tag
+        continue-on-error: true
+        run: |
+          url="https://jitpack.io/com/github/$GITHUB_REPOSITORY/$GITHUB_REF_NAME/build.log"
+          echo "requesting $url"
+          code="$(curl -sS -m 900 -o jitpack-build.log -w '%{http_code}' "$url" || echo 000)"
+          echo "HTTP $code"
+          echo "--- last 40 lines of the JitPack build log ---"
+          tail -40 jitpack-build.log 2>/dev/null || echo "(no log returned)"
+          test "$code" = "200"

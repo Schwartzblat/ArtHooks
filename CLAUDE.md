@@ -96,9 +96,16 @@ The `jdk:` in `jitpack.yml` is only the JVM that launches the Gradle wrapper. Gr
 its own daemon JVM (26) from the URLs in `gradle/gradle-daemon-jvm.properties`, so the two do not
 have to match.
 
-The `publish-dry-run` CI job runs JitPack's exact command on a `v*` tag and asserts the AAR and POM
-land under the right coordinate. It publishes nothing -- it exists so a tag JitPack cannot build
-fails somewhere with a readable log.
+The `release` CI job fires on any tag matching `[0-9]*` or `v[0-9]*`. It builds under the coordinate
+JitPack serves, attaches the AAR, POM, sources jar and `SHA256SUMS.txt` to the GitHub release, then
+asks JitPack to build the tag so the coordinate resolves without waiting for a consumer. It needs
+`contents: write`; the JitPack request is `continue-on-error` because the assets are already
+published by that point.
+
+**Tag names are versions, literally.** JitPack serves tag `1.0.2` as version `1.0.2` and tag `v1.0.2`
+as version `v1.0.2`, so releases use bare semver. `v*` stays matched only so an old-style tag
+releases instead of silently matching nothing -- which is exactly what happened to tag `1.0.1`, back
+when the trigger was `tags: ['v*']`: no workflow ran at all, and the release sat empty.
 
 `android.builtInKotlin=false` in `gradle.properties` keeps AGP 9 from putting a `kotlin-stdlib`
 dependency in the POM. There is no Kotlin here, and without it every consumer inherits the stdlib.

@@ -239,23 +239,32 @@ have to reproduce later.
 
 ### Cutting a release
 
-Push a tag. That is the whole procedure — there is no publish step here, and no credentials to
-configure, because JitPack builds the tag on its own machines the first time someone asks for it.
+Push a **bare semver tag** — no `v` prefix:
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag 1.0.2 && git push origin 1.0.2
 ```
 
-Then open `https://jitpack.io/#Schwartzblat/ArtHooks` and hit **Get it** on the tag to make JitPack
-build it immediately, rather than leaving the first consumer to wait.
+The prefix matters here in a way it usually does not: **JitPack serves a tag under its literal
+name**, so tag `v1.0.2` would make the dependency `...:arthooks:v1.0.2`. The workflow still matches
+`v*` tags so an old-style one releases rather than silently doing nothing, and it strips the `v` from
+the version inside the artifacts — but the JitPack coordinate keeps whatever you typed.
 
-`jitpack.yml` controls that build: it selects the JVM that launches the Gradle wrapper, and
-pre-installs the NDK and CMake, without which the native half will not compile. `arthooks/build.gradle`
-reads `-Pgroup` and `-Pversion`, which is how JitPack injects the coordinate it intends to serve.
+That push runs the `release` job, which after the build and the emulator self-test pass will:
 
-The `v*` tag also runs a `publish-dry-run` CI job that executes JitPack's exact publish command and
-asserts the AAR and POM land under the right coordinate. It publishes nothing; it exists so a broken
-tag fails somewhere with a readable log instead of only inside JitPack.
+1. Build the AAR, POM and sources jar under the exact coordinate JitPack serves, failing the release
+   if the AAR or POM is missing rather than publishing an empty one.
+2. Attach them, plus `SHA256SUMS.txt`, to the GitHub release for that tag — creating the release if
+   it does not already exist.
+3. Ask JitPack to build the tag, so the Maven coordinate resolves straight away instead of making
+   the first consumer sit through a multi-minute build. This step cannot fail the release: the
+   GitHub assets are already published by then, and a consumer's own request would trigger the
+   build anyway.
+
+`jitpack.yml` controls JitPack's side of that build: it selects the JVM that launches the Gradle
+wrapper and pre-installs the NDK and CMake, without which the native half will not compile.
+`arthooks/build.gradle` reads `-Pgroup` and `-Pversion`, which is how JitPack injects the coordinate
+it intends to serve.
 
 ### R8
 

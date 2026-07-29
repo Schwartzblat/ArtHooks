@@ -16,8 +16,35 @@ activity="com.example.arthooks.MainActivity"
 # script exits as soon as it sees a verdict, so a high ceiling costs nothing when things go well.
 timeout_seconds="${SELFTEST_TIMEOUT:-600}"
 
+# Retries a command, because every step below this point is a single point of failure under
+# `set -e`: one transient hiccup and the whole CI job fails with no test having run. Observed
+# failure rate before this existed was roughly one job in two.
+retry() {
+    local attempts="$1" delay="$2" n=1
+    shift 2
+    until "$@"; do
+        if [ "$n" -ge "$attempts" ]; then
+            echo "giving up on '$*' after $n attempts" >&2
+            return 1
+        fi
+        echo "note: '$*' failed, retrying in ${delay}s ($n/$attempts)" >&2
+        sleep "$delay"
+        n=$(( n + 1 ))
+    done
+}
+
 adb wait-for-device
-"$root/gradlew" -p "$root" :app:installDebug
+
+# boot_completed goes high before the package manager is actually ready to install, and an install
+# issued into that window fails with the device "offline" or "not found". Wait for a real pm query
+# to answer rather than trusting the boot flag alone.
+echo "waiting for the package manager..."
+retry 60 2 adb shell pm path android > /dev/null
+
+# Two independent transient failures live in this one command: Gradle resolving dependencies over
+# the network (a reset here is what the CI logs showed), and adb installing onto an emulator that
+# has only just finished booting.
+retry 3 15 "$root/gradlew" -p "$root" :app:installDebug
 
 # Emulators fail this often enough to matter ("failed to clear the 'main' log"), and under `set -e`
 # an unguarded failure here kills the run before the app is even started. Nothing below depends on
@@ -32,7 +59,13 @@ adb logcat -c 2>/dev/null || echo "note: could not clear logcat; filtering by ti
 started_at="$(adb shell "date '+%m-%d %H:%M:%S.000'" | tr -d '\r')"
 
 adb shell am force-stop "$package" || true
-adb shell am start -n "$package/$activity" > /dev/null
+
+# `am start` can fail transiently the same way, and its failure is the one case where the verdict
+# loop would otherwise wait out the full timeout for an app that was never launched.
+start_activity() {
+    adb shell am start -n "$package/$activity" > /dev/null
+}
+retry 3 5 start_activity
 
 self_test_log() {
     adb logcat -t "$started_at" -s HookSelfTest:V 2>/dev/null || true
