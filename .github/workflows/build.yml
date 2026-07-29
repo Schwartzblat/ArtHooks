@@ -52,7 +52,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      # Retry once to tolerate transient network errors (e.g. ECONNRESET) when resolving Temurin.
+      - id: setup-java
+        uses: actions/setup-java@v4
+        continue-on-error: true
+        with:
+          distribution: temurin
+          java-version: '26'
+
+      - if: steps.setup-java.outcome == 'failure'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '26'
