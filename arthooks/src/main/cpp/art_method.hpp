@@ -67,5 +67,22 @@ void *get_entry_point(const ArtMethod *art_method);
 
 void set_entry_point(ArtMethod *art_method, void *entry_point);
 
+/**
+ * Asks ART not to JIT-compile this method, by setting kAccCompileDontBother on it.
+ *
+ * Without this, hooking a method that is *currently hot* can silently lose the hook: the JIT may
+ * already have queued that method for compilation, and when the compile finishes ART installs the
+ * result into entry_point_from_quick_compiled_code_ -- the very field the trampoline lives in --
+ * overwriting it. The method then runs its original body again, permanently.
+ *
+ * Returns false when the flag could not be set, which is not fatal: the hook still works, it is just
+ * exposed to that race. Best effort in one more way too -- a compilation already in flight when this
+ * is called may still land, so it narrows the window rather than closing it.
+ */
+bool discourage_compilation(ArtMethod *art_method);
+
+/** Whether access_flags_ was located, and so whether discourage_compilation() can do anything. */
+bool can_discourage_compilation();
+
 
 #endif //ARTHOOKS_ART_METHOD_HPP

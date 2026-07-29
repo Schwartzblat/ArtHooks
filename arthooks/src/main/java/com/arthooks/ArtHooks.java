@@ -70,6 +70,22 @@ public class ArtHooks {
 
     private static native boolean init(int sdk_version);
 
+    // Used at startup to locate art::ArtMethod::access_flags_, by finding the one offset whose word
+    // matches each probe's own getModifiers(). That needs two probes whose modifiers differ in as
+    // many bits as possible, so a word at some other offset cannot match both by accident. The two
+    // shapes here are load-bearing: `private static` is 0x0a and `public final` is 0x11, which share
+    // no bits at all.
+    //
+    // Use only modifiers ART stores verbatim. `synchronized` in particular is not one of them -- it
+    // is kept as ACC_DECLARED_SYNCHRONIZED (0x20000) and only mapped back to 0x20 by getModifiers().
+    //
+    // These sort before layout_probe_* (f < l), so they do not come between the two of those.
+    private static void flag_probe_a() {
+    }
+
+    public final void flag_probe_b() {
+    }
+
     // Measured against each other at startup to recover sizeof(art::ArtMethod) on the running
     // platform: ART stores a class's methods in one contiguous array, so two adjacent direct
     // methods sit exactly one ArtMethod apart. Unused on purpose, and must stay adjacent -- the

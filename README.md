@@ -159,12 +159,12 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.1'
+    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.3'
 }
 ```
 
 The group is the *repository* and the artifact is the *module*, because this is a multi-module
-build — `com.github.Schwartzblat:ArtHooks:1.0.1`, the single-module form, will not resolve.
+build — `com.github.Schwartzblat:ArtHooks:1.0.3`, the single-module form, will not resolve.
 
 Any git tag works as a version, and so does `main-SNAPSHOT` for the tip of the branch. The first
 request for a given tag makes JitPack build it, which takes a few minutes and can fail; the log is
@@ -196,7 +196,7 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.arthooks:arthooks:1.0.1'
+    implementation 'com.arthooks:arthooks:1.0.3'
 }
 ```
 
@@ -242,11 +242,11 @@ have to reproduce later.
 Push a **bare semver tag** — no `v` prefix:
 
 ```bash
-git tag 1.0.2 && git push origin 1.0.2
+git tag 1.0.3 && git push origin 1.0.3
 ```
 
 The prefix matters here in a way it usually does not: **JitPack serves a tag under its literal
-name**, so tag `v1.0.2` would make the dependency `...:arthooks:v1.0.2`. The workflow still matches
+name**, so tag `v1.0.3` would make the dependency `...:arthooks:v1.0.3`. The workflow still matches
 `v*` tags so an old-style one releases rather than silently doing nothing, and it strips the `v` from
 the version inside the artifacts — but the JitPack coordinate keeps whatever you typed.
 
@@ -306,6 +306,14 @@ runs both.
 
 ## Limitations
 
+- **Hooking a method that is already hot is not fully safe.** The hook lives in the target's entry
+  point, and so does the JIT's output. If ART has already queued the target for compilation, a
+  compile that finishes after the hook is installed overwrites it — silently, and permanently, so the
+  method simply runs its original body again. ArtHooks sets `kAccCompileDontBother` on the target
+  before writing the entry point, which stops ART compiling it and closes the common case, but a
+  compilation already in flight can still land. Separately, callers that are already compiled may
+  call the target directly or have inlined it, bypassing the entry point altogether. Hook during
+  startup, before the methods you are hooking have been called thousands of times.
 - **No unhook.** Trampolines and snapshots live for the lifetime of the process. Hooking the same
   method twice chains, second hook outermost.
 - **A `synchronized` target's monitor is not taken.** A `synchronized` *method* has no

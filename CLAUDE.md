@@ -191,11 +191,40 @@ method they expect. Copying those fields instead breaks both.
   on a real device here; the arm/x86/x86_64 encodings were checked against the NDK assembler. If you
   touch them, verify the emitted bytes disassemble to the intended instructions rather than eyeballing
   the hex.
-- **Entry points are the only thing the hook writes.** Access flags are deliberately left alone —
-  nothing here needs `kAccCompileDontBother`, and the runtime-only flag bits are not stable enough
-  across releases to poke blind. The self-test is what establishes that ART does not overwrite a
-  hooked or backup entry point under JIT pressure; re-run it before assuming that still holds on a
-  newer platform.
+- **The hook writes the entry point *and* `kAccCompileDontBother`.** The second one is not optional,
+  and an earlier version of this file claimed it was. Hooking a method that is **currently hot** races
+  with the JIT: ART may already have queued that method for compilation, and when the compile
+  finishes it installs the result into `entry_point_from_quick_compiled_code_` — the field the
+  trampoline lives in — overwriting the hook silently and permanently. `RuntimeCases.concurrent_install`
+  is what caught this, failing roughly half of CI runs with `the hook was not in place after the race`.
+  `discourage_compilation()` sets the flag before the entry point is written, so ART declines to
+  compile the target at all.
+
+  It narrows the race rather than closing it: a compilation already in flight when the flag is set can
+  still land. And it does nothing for the second mechanism — a caller that is already compiled may
+  call the target's code directly or have inlined it, bypassing the entry point entirely, which is the
+  same hazard documented above for AOT boot-image callers.
+
+  The JIT-survival check passes without any of this because it hooks a **cold** method: afterwards the
+  target's own body never runs, so ART accumulates no hotness for it and never recompiles it. That
+  check therefore establishes much less than it appears to — re-read it before trusting it as
+  evidence about JIT pressure generally.
+- **`access_flags_` is located at runtime, not indexed.** `find_access_flags_offset()` reads both
+  `ArtHooks.flag_probe_*` methods at every aligned offset and takes the one word that matches each
+  probe's own `getModifiers()`, requiring exactly one match — same measure-don't-assume approach as
+  `sizeof(ArtMethod)`. The probes must keep **disjoint** modifiers (`private static` = 0x0a,
+  `public final` = 0x11); give them the same shape and the scan goes ambiguous and disables itself.
+  When it finds 0 or >1 candidates it dumps every word of both probes to logcat, which is how to
+  diagnose a platform where it stops working.
+
+  **Do not put `synchronized` on a probe.** A dex method never carries `ACC_SYNCHRONIZED` (0x20) — it
+  carries `ACC_DECLARED_SYNCHRONIZED` (0x20000), which is what ART stores, and `getModifiers()` only
+  maps it back to 0x20 on the way out. That mismatch is why the mask excludes 0x20, and it is what
+  made the first version of this probe find zero candidates on API 36.
+- **`kAccCompileDontBother = 0x02000000` is the one constant here taken on faith.** Unlike the
+  layout it cannot be measured — no method is known to already carry it. It has held across Android
+  8–16. The blast radius is limited by only writing it after the offset has been confirmed against
+  two probes, and by reading the flag back afterwards; a failure logs and leaves the hook installed.
 - **Hooking forces the target's and replacement's classes to initialize** (via `Class.forName`),
   because ART rewrites every method's entry point when it finally runs a class initializer, which
   would silently drop a hook installed first. This means hooking has the side effect of running

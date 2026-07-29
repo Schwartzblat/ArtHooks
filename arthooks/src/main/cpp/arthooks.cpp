@@ -137,6 +137,14 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
         return false;
     }
 
+    // Before anything is written: if the target is currently hot, the JIT may already have queued it
+    // for compilation, and a compile that lands after the trampoline is installed would overwrite the
+    // entry point and silently drop the hook. Telling ART not to compile it closes that off. Ordering
+    // matters -- doing this after the entry point write would leave the window open in between.
+    if (!discourage_compilation(target) && can_discourage_compilation()) {
+        LOGW("could not stop ART compiling %p; hooking it while it is hot may lose the hook", target);
+    }
+
     // The backup goes in first: once the target is redirected, the replacement can be entered on
     // another thread and call through immediately.
     if (backup_method != nullptr && !install_backup(backup_method, target)) {

@@ -15,7 +15,7 @@ plugins {
 group = providers.gradleProperty('group').getOrElse('com.arthooks')
 version = providers.gradleProperty('arthooksVersion')
         .orElse(providers.gradleProperty('version'))
-        .getOrElse('1.0.1')
+        .getOrElse('1.0.3')
 
 android {
     namespace 'com.arthooks'
