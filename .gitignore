@@ -15,3 +15,8 @@ build/
 .cxx
 local.properties
 .idea
+
+# Eclipse / Buildship, generated when the project is opened via the Gradle tooling API
+.project
+.classpath
+.settings/
