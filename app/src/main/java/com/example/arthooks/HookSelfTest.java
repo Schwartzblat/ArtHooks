@@ -20,6 +20,13 @@ public class HookSelfTest {
     private static final int ITERATIONS = 200_000;
     private static final int PASSES = 4;
 
+    private static final int GC_ROUNDS = 6;
+    private static final int ALLOCATIONS_PER_ROUND = 400;
+    private static final int ALLOCATION_SIZE = 64 * 1024;
+
+    /** Static so the allocations below cannot be optimised away as dead. */
+    static byte[] garbage;
+
     static int original_calls;
     static int replacement_calls;
 
@@ -31,6 +38,7 @@ public class HookSelfTest {
     private static void check() {
         try {
             if (hook_and_backup_survive_the_jit()
+                    && backup_survives_a_relocating_gc()
                     && static_target_is_hooked_and_initialized()
                     && SignatureCases.check()
                     && DispatchCases.check()
@@ -104,6 +112,66 @@ public class HookSelfTest {
         }
         return pass("hook and backup both survived " + expected + " calls across "
                 + PASSES + " passes");
+    }
+
+    // --- surviving a relocating GC ----------------------------------------------------------
+
+    /** The method under test. Its declaring class is what the GC gets a chance to relocate. */
+    public int gc_target(int value) {
+        return value + 7;
+    }
+
+    /** Replaces {@link #gc_target} and calls through, so every call exercises the backup. */
+    public static int gc_replacement(Object thiz, int value) {
+        return gc_backup(thiz, value) * 3;
+    }
+
+    /** Backup slot for {@link #gc_target}. */
+    public static int gc_backup(Object thiz, int value) {
+        Log.e(TAG, "gc_backup ran its own body: the backup was not installed");
+        return Integer.MIN_VALUE;
+    }
+
+    /**
+     * Calls the backup across repeated collections.
+     *
+     * <p>ArtMethod::declaring_class_ is a GcRoot, and the runtime rewrites it in every real
+     * ArtMethod when the compacting collector relocates the class. A backup built on an ArtMethod
+     * the runtime does not own never receives that fixup, and nterp dereferences that field on
+     * every invocation -- so the first call after a relocation reads a dead class.
+     *
+     * <p>Note the failure mode: the process takes SIGSEGV inside the backup rather than reaching
+     * {@link Checks#fail}, so a regression here shows up as the self-test dying mid-run, with the
+     * last log line being this case's name.
+     */
+    private static boolean backup_survives_a_relocating_gc() {
+        HookSelfTest instance = new HookSelfTest();
+        if (!hook(declared_method(HookSelfTest.class, "gc_target", int.class),
+                declared_method(HookSelfTest.class, "gc_replacement", with_thiz(int.class)),
+                declared_method(HookSelfTest.class, "gc_backup", with_thiz(int.class)))) {
+            return false;
+        }
+
+        if (instance.gc_target(1) != (1 + 7) * 3) {
+            return fail("the backup was already wrong before any collection");
+        }
+
+        for (int round = 1; round <= GC_ROUNDS; round++) {
+            // Churn first, so the explicit collection below has something to compact.
+            for (int i = 0; i < ALLOCATIONS_PER_ROUND; i++) {
+                garbage = new byte[ALLOCATION_SIZE];
+            }
+            System.gc();
+            System.runFinalization();
+            System.gc();
+
+            int result = instance.gc_target(round);
+            if (result != (round + 7) * 3) {
+                return fail("round " + round + " returned " + result
+                        + ", expected " + ((round + 7) * 3));
+            }
+        }
+        return pass("hook and backup survived " + GC_ROUNDS + " rounds of collection");
     }
 
     // --- forcing a class initialiser -----------------------------------------------------------

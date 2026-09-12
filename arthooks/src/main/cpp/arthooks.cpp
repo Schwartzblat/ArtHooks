@@ -1,8 +1,5 @@
 #include "arthooks.hpp"
 
-#include <cstdlib>
-#include <cstring>
-
 #include "art_method.hpp"
 #include "class_init.hpp"
 #include "log.hpp"
@@ -57,30 +54,34 @@ void warn_if_synchronized(JNIEnv *env, jobject original) {
 }
 
 /**
- * Points `backup` at a snapshot of `target` taken before it is hooked, so calling the backup runs
- * the original body.
+ * Points `backup` at `target`'s original body, by capturing its entry point before the hook
+ * overwrites it and baking that address into the backup's own trampoline.
  *
- * The snapshot is a private copy of the ArtMethod rather than the real one: the trampoline has to
- * name a method whose entry point still points at the original code, and `target`'s is about to
- * stop doing that. Reading the entry point from the copy also stops ART from ever routing the
- * backup back through the hook.
+ * Must be called before the target is redirected, or the captured address is the hook itself and
+ * the backup becomes an infinite loop.
+ *
+ * The trampoline names the real `target`, not a copy of it. Copying is the obvious implementation
+ * -- a private ArtMethod whose entry point still refers to the original code -- but an ArtMethod
+ * the runtime does not own is a liability: declaring_class_ is a GcRoot that ART rewrites in every
+ * real ArtMethod when the compacting GC relocates the class, and a detached copy never gets that
+ * fixup. nterp walks declaring_class_ -> dex cache on every invocation, so the first call after a
+ * relocating GC reads a dead class and crashes. Measured on Android 16 / API 36: five backup calls
+ * succeeded, a 76MB concurrent mark-compact GC ran, and the next call took SIGSEGV.
  */
-bool install_backup(ArtMethod *backup, const ArtMethod *target) {
-    ArtMethod *snapshot = static_cast<ArtMethod *>(malloc(art_method_size()));
-    if (snapshot == nullptr) {
-        LOGE("out of memory while backing up ArtMethod %p", target);
+bool install_backup(ArtMethod *backup, ArtMethod *target) {
+    void *original_entry = get_entry_point(target);
+    if (original_entry == nullptr) {
+        LOGE("ArtMethod %p has no entry point to back up", target);
         return false;
     }
-    memcpy(snapshot, target, art_method_size());
 
-    void *trampoline = make_trampoline(snapshot);
+    void *trampoline = make_direct_trampoline(target, original_entry);
     if (trampoline == nullptr) {
-        free(snapshot);
         return false;
     }
 
     set_entry_point(backup, trampoline);
-    LOGD("backup ArtMethod %p now runs the body of %p", backup, target);
+    LOGD("backup ArtMethod %p now runs the body of %p (entry %p)", backup, target, original_entry);
     return true;
 }
 
