@@ -63,7 +63,29 @@ public class ArtHooks {
      * run {@code original}'s pre-hook body so the replacement can call through to it.
      *
      * <p>Call the backup by its own name; it keeps its Java identity and only its entry point
-     * changes. Returns false on failure.
+     * changes.
+     *
+     * <p><b>The backup must be declared {@code native}</b>, with the same signature as the
+     * replacement and no body:
+     *
+     * <pre>{@code
+     * static native boolean gate_backup(Object thiz);
+     * }</pre>
+     *
+     * <p>Only the entry point is swapped, so every call to the backup has to go through it. A
+     * backup with a Java body does not: it is small and returns nothing interesting, so the
+     * compiler inlines it into the replacement and the call site ends up holding a copy of the
+     * backup's own body. dex2oat does that at install time, before any of this runs, so the swap is
+     * invisible and the replacement silently gets the backup's own answer instead of the
+     * original's. A native method has no body to copy. A backup that is not native is refused
+     * rather than installed, because the alternative is a hook that reports success and returns the
+     * wrong value from then on.
+     *
+     * <p>A {@code static} target is the exception, and is only warned about: backing one up is
+     * unreliable in a release build whether or not the backup is native, and the rule that would
+     * make it work is not known yet. See the TODO in the README.</p>
+     *
+     * <p>Returns false on failure.
      */
     public static native boolean hook_function(Executable original, Executable replacement,
                                                Executable backup);

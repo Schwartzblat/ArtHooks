@@ -43,7 +43,8 @@ public class HookSelfTest {
                     && SignatureCases.check()
                     && DispatchCases.check()
                     && RuntimeCases.check()
-                    && LookupCases.check()) {
+                    && LookupCases.check()
+                    && ArityCases.check()) {
                 Log.i(TAG, "PASS: all checks passed");
             }
         } catch (Throwable t) {
@@ -65,11 +66,8 @@ public class HookSelfTest {
         return backup(thiz, value) * 10;
     }
 
-    /** Backup slot for {@link #target}; reaching this body means the backup was not installed. */
-    public static int backup(Object thiz, int value) {
-        Log.e(TAG, "backup ran its own body: the backup was not installed");
-        return Integer.MIN_VALUE;
-    }
+    /** Backup slot for {@link #target}. Native, so nothing can inline it out of the replacement. */
+    public static native int backup(Object thiz, int value);
 
     private static boolean hook_and_backup_survive_the_jit() {
         HookSelfTest instance = new HookSelfTest();
@@ -127,10 +125,7 @@ public class HookSelfTest {
     }
 
     /** Backup slot for {@link #gc_target}. */
-    public static int gc_backup(Object thiz, int value) {
-        Log.e(TAG, "gc_backup ran its own body: the backup was not installed");
-        return Integer.MIN_VALUE;
-    }
+    public static native int gc_backup(Object thiz, int value);
 
     /**
      * Calls the backup across repeated collections.

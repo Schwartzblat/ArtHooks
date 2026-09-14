@@ -12,8 +12,10 @@ demo that also carries the test suite).
 
 ## Status
 
-Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 16 self-test checks
-covering return shapes, dispatch kinds, JIT survival and concurrent installation.
+Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 23 self-test checks
+covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival and
+concurrent installation. All 23 pass in a debug build; two fail in a release build, see
+[TODO](#todo).
 
 Four ABIs are built. Only arm64-v8a has been exercised on hardware; the armeabi-v7a, x86_64 and x86
 trampoline encodings were verified by disassembling the emitted bytes against the NDK assembler.
@@ -30,7 +32,7 @@ trampoline encodings were verified by disassembling the emitted bytes against th
 particular Android release — but it has only been run against API 36. See
 [Limitations](#limitations).
 
-## The one rule
+## The two rules
 
 **A replacement must be `static`, and takes the receiver as an explicit leading `Object thiz`.**
 
@@ -47,6 +49,22 @@ argument is its receiver.
 A constructor is the instance-method case: the object is already allocated when `<init>` runs, so it
 arrives as `thiz`. Nothing initialises it unless the replacement calls the backup.
 
+**A backup must be `native`**, with the replacement's signature and no body.
+
+Only the backup's entry point is swapped, which assumes every call to it goes through that field. A
+backup with a Java body does not: it is small and returns nothing interesting, so the compiler
+inlines it into the replacement, and the call site ends up holding a copy of the backup's own body.
+dex2oat does that at install time, before any of this runs, so the swap is invisible and the
+replacement silently gets the backup's own answer instead of the original's — no error, no log, just
+the wrong value from then on. A native method has no body to copy.
+
+```java
+static native boolean gate_backup(Object thiz);
+```
+
+A non-native backup is refused rather than installed, for a target that is not static. Static targets
+are exempt only because the rule there is not yet known; see [TODO](#todo).
+
 ## Usage
 
 ### Redirect a method, and call through to the original
@@ -59,9 +77,8 @@ public final class MyHook {
         on_click_backup(thiz, view);           // runs the original body
     }
 
-    /** Backup slot. Once hooked, calling this runs MainActivity.on_click instead of this body. */
-    public static void on_click_backup(Object thiz, View view) {
-    }
+    /** Backup slot. Native: a body here would be inlined into the hook above and never run. */
+    public static native void on_click_backup(Object thiz, View view);
 
     static boolean install() throws NoSuchMethodException {
         return ArtHooks.hook_function(
@@ -159,12 +176,12 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.4'
+    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.5'
 }
 ```
 
 The group is the *repository* and the artifact is the *module*, because this is a multi-module
-build — `com.github.Schwartzblat:ArtHooks:1.0.4`, the single-module form, will not resolve.
+build — `com.github.Schwartzblat:ArtHooks:1.0.5`, the single-module form, will not resolve.
 
 Any git tag works as a version, and so does `main-SNAPSHOT` for the tip of the branch. The first
 request for a given tag makes JitPack build it, which takes a few minutes and can fail; the log is
@@ -196,7 +213,7 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.arthooks:arthooks:1.0.4'
+    implementation 'com.arthooks:arthooks:1.0.5'
 }
 ```
 
@@ -242,11 +259,11 @@ have to reproduce later.
 Push a **bare semver tag** — no `v` prefix:
 
 ```bash
-git tag 1.0.4 && git push origin 1.0.4
+git tag 1.0.5 && git push origin 1.0.5
 ```
 
 The prefix matters here in a way it usually does not: **JitPack serves a tag under its literal
-name**, so tag `v1.0.4` would make the dependency `...:arthooks:v1.0.4`. The workflow still matches
+name**, so tag `v1.0.5` would make the dependency `...:arthooks:v1.0.5`. The workflow still matches
 `v*` tags so an old-style one releases rather than silently doing nothing, and it strips the `v` from
 the version inside the artifacts — but the JitPack coordinate keeps whatever you typed.
 
@@ -295,7 +312,7 @@ suite takes about six seconds to finish, most of it deliberately waiting for the
 ```bash
 ./tools/run-selftest.sh     # installs, runs, and exits non-zero unless every check passed
 
-adb logcat -s HookSelfTest  # 16 checks, then "PASS: all checks passed"
+adb logcat -s HookSelfTest  # 23 checks, then "PASS: all checks passed"
 adb logcat -s ArtHooks      # native log tag
 ```
 
@@ -340,6 +357,11 @@ runs both.
 - **Boot-classpath targets work from app call sites, but not necessarily from inside the
   framework.** AOT code can call a known-address callee directly instead of loading its entry point,
   and nothing here detects that.
+- **A target that an AOT-compiled caller has inlined cannot be hooked at all.** Same cause as the
+  backup rule above, on the other side of the call: there is no call left to redirect. Measured on
+  API 36 — a tight loop over a one-line target, compiled with `compile -m speed`, keeps running the
+  original body with the hook installed and reporting success. Nothing detects it, and no
+  entry-point hooking library can fix it.
 - **`find_function` searches superclasses**, unlike `getDeclaredMethod`. An inherited method
   resolves to the superclass's `ArtMethod`, so hooking it affects every subclass.
 - **The `ArtMethod` mirror in `art_method.hpp` is hand-maintained.** Nothing indexes it — the layout
@@ -347,6 +369,27 @@ runs both.
   the struct no longer describes that platform.
 - **The backup's snapshot is not visited by the GC.** It holds a `GcRoot` to the declaring class,
   which is safe only because ART allocates `mirror::Class` as non-movable.
+
+## TODO
+
+- **Backing up a `static` target recurses.** Calling the backup lands back in the replacement
+  instead of the original body, until the stack overflows. Reproduced by the two `StaticTarget`
+  cases in `ArityCases`; `DispatchCases.static_target_with_backup` fails the same way.
+
+  What it is not: argument count (7 and 8 both recurse), the `native` backup rule above (recurses
+  with a body too), the target sharing a class with the replacement (recurses either way), an
+  unsettled entry point (calling the target once before hooking does not help), or the compiler
+  filter (`-m verify` and `-m speed` both recurse). The captured entry points were classified
+  against `/proc/<pid>/maps` and land in the app's own compiled code, not in a `libart.so` stub, so
+  the obvious "a stub re-dispatches through the hooked method" story does not hold either.
+
+  The one thing that correlates is **debug build versus release build**: every shape passes in
+  debug. A debuggable app is neither AOT-compiled nor JIT-compiled, so the working hypothesis is
+  that this is the JIT rather than the dex output — unverified. Next step is disassembling the
+  captured entry address out of the oat file to see what code actually sits there.
+
+  Until then `hook_function` logs a warning and installs anyway, rather than refusing a shape that
+  does work in some configurations. Instance-method and constructor targets are unaffected.
 
 ## Layout
 

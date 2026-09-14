@@ -42,6 +42,7 @@ SignatureCases              # one hook per return shape + a stack-spilling argum
 DispatchCases               # constructor, static+backup, private/final, interface, JNI, synchronized
 RuntimeCases                # boot-classpath target, chained hooks, install under concurrent calls
 LookupCases                 # find_function: each kind, overload picking, misses, find-then-hook
+ArityCases                  # backups whose arguments spill past the ABI's registers
 ```
 
 ## Build

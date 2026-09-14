@@ -17,9 +17,7 @@ public class HookExample {
      * body instead of the body below -- so reaching this log line means the backup never got
      * installed.
      */
-    public static void hook_backup(Object thiz, View view) {
-        Log.e(TAG, "hook_backup ran its own body: the backup was not installed");
-    }
+    public static native void hook_backup(Object thiz, View view);
 
     public static void hook_with(Object thiz, View view) {
         Log.i(TAG, "hook_with: hook ran, thiz is a " + thiz.getClass().getName());

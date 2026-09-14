@@ -13,6 +13,10 @@ jmethodID g_get_modifiers = nullptr;
 // java.lang.reflect.Modifier.SYNCHRONIZED. On a method this is ACC_SYNCHRONIZED.
 constexpr jint kAccSynchronized = 0x0020;
 
+// java.lang.reflect.Modifier.NATIVE and .STATIC.
+constexpr jint kAccNative = 0x0100;
+constexpr jint kAccStatic = 0x0008;
+
 bool find_get_modifiers(JNIEnv *env) {
     jclass executable_class = env->FindClass("java/lang/reflect/Executable");
     if (executable_class == nullptr) {
@@ -51,6 +55,72 @@ void warn_if_synchronized(JNIEnv *env, jobject original) {
              "synchronize the replacement yourself on the receiver, or on the declaring class if "
              "the target is static");
     }
+}
+
+/** Reads an Executable's Java modifiers. Returns false when they could not be read. */
+bool modifiers_of(JNIEnv *env, jobject executable, jint *modifiers_out) {
+    if (g_get_modifiers == nullptr) {
+        return false;
+    }
+    jint modifiers = env->CallIntMethod(executable, g_get_modifiers);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    *modifiers_out = modifiers;
+    return true;
+}
+
+/**
+ * Refuses a backup whose shape does not match its target, because the mismatch fails silently.
+ *
+ * Installing a backup only rewrites its entry point, which assumes every call to it goes through
+ * that field. Whether that holds depends on the *target*, and the two cases want opposite things.
+ *
+ * For an instance method or a constructor the backup has to be `native`. A backup with a Java body
+ * is small and returns nothing interesting, so the compiler inlines it into the replacement and the
+ * call site ends up holding a copy of the backup's own body instead of a call. dex2oat does that at
+ * install time -- before any of this code has run, so nothing here can undo it -- and the JIT does
+ * it again later. The replacement then gets the backup's own do-nothing answer, the original body
+ * never runs, and nothing reports an error: the hook says it succeeded and quietly returns the
+ * wrong value from then on. A native method has no body to copy, so the call has to go through the
+ * entry point. Measured on Android 16 / API 36: the same hook passes under `compile -m verify` and
+ * fails under `compile -m speed`, which is why an app can work when it is installed and start
+ * misbehaving hours later once background dexopt has compiled it.
+ *
+ * A static target is left alone, because the same reasoning does not hold there and the shape that
+ * does work is not established. Backing one up recurses into the replacement until the stack runs
+ * out in a release build, whether or not the backup is native, while every shape passes in a debug
+ * build -- so the rule to enforce is not known yet, and guessing one would refuse a hook that
+ * works. Warn instead. Separate defect; see ArityCases in the self-test.
+ */
+bool reject_mismatched_backup(JNIEnv *env, jobject original, jobject backup) {
+    jint target_modifiers = 0;
+    jint backup_modifiers = 0;
+    if (!modifiers_of(env, original, &target_modifiers)
+        || !modifiers_of(env, backup, &backup_modifiers)) {
+        // Advisory lookup. Refusing every backup because the shape could not be read would be worse
+        // than the risk of installing a mismatched one.
+        LOGW("cannot read the target's or backup's modifiers; the backup shape is unchecked");
+        return false;
+    }
+
+    const bool target_is_static = (target_modifiers & kAccStatic) != 0;
+    const bool backup_is_native = (backup_modifiers & kAccNative) != 0;
+
+    if (!target_is_static && !backup_is_native) {
+        LOGE("the backup for an instance method or constructor must be declared native -- one with "
+             "a Java body gets inlined into the replacement by dex2oat, which makes the entry point "
+             "swap invisible and leaves the backup silently returning its own answer. Declare it "
+             "`static native` with no body, keeping the replacement's signature.");
+        return true;
+    }
+    if (target_is_static) {
+        LOGW("backing up a static target is unreliable: in a release build the backup recurses into "
+             "the replacement until the stack overflows, with or without `native`. Installing it "
+             "anyway, because it does work in a debug build and the rule is not pinned down yet.");
+    }
+    return false;
 }
 
 /**
@@ -129,6 +199,12 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
         return false;
     }
     warn_if_synchronized(env, original);
+
+    // Before any state is touched: a backup that can be inlined cannot be installed at all, and
+    // failing here leaves the target running its own body rather than half-hooked.
+    if (backup != nullptr && reject_mismatched_backup(env, original, backup)) {
+        return false;
+    }
 
     ArtMethod *target = get_art_method(env, original);
     ArtMethod *hook = get_art_method(env, replacement);

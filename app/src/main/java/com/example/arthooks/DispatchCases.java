@@ -44,9 +44,7 @@ class DispatchCases {
         constructed_backup(thiz, value * 2);
     }
 
-    static void constructed_backup(Object thiz, int value) {
-        Log.e(TAG, "constructed_backup ran its own body");
-    }
+    static native void constructed_backup(Object thiz, int value);
 
     private static boolean constructor_case() {
         if (!hook(declared_constructor(Constructed.class, int.class),
@@ -72,6 +70,7 @@ class DispatchCases {
         return static_backup(value) * 10;
     }
 
+    // A static target's backup keeps a body: a native one recurses back into the replacement.
     static int static_backup(int value) {
         Log.e(TAG, "static_backup ran its own body");
         return Integer.MIN_VALUE;
@@ -203,10 +202,7 @@ class DispatchCases {
         return synchronized_backup(thiz);
     }
 
-    static boolean synchronized_backup(Object thiz) {
-        Log.e(TAG, "synchronized_backup ran its own body");
-        return false;
-    }
+    static native boolean synchronized_backup(Object thiz);
 
     private static boolean synchronized_target_case() {
         if (!hook(declared_method(DispatchCases.class, "synchronized_target"),
