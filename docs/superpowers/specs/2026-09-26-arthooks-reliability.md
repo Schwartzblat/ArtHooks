@@ -151,8 +151,37 @@ Measured 2×2 (release APK, self-test):
   `strings` 6.2x and `hashmap` 3.4x under `disable_aot()` versus 1.4x and 1.2x under `vmSafeMode`.
 - Cold start on the demo: 89 ms baseline, 95 ms `vmSafeMode`, 124 ms `disable_aot()`.
 
-**Implication:** `DeoptimizeBootImage()` is the expensive half and buys only boot-classpath hooks
-called from inside the framework. It should not be automatic.
+**Update, 2026-09-26 (Pixel 9a, API 36, `tools/run-benchmark.sh 3`):** the attribution above was
+tested directly and refuted. Task 5 made `disable_aot_code()` take a `deoptimize_boot_image`
+parameter, defaulting to off, so `DeoptimizeBootImage()` no longer ran unless asked for. All 30
+self-test checks still passed with it off, including the boot-classpath case
+(`RuntimeCases.cross_dex_replacement`, which calls from the app and needs nothing extra). But with
+the boot image left alone, the `AOT + disable_aot` first-round figures for the two rows above did
+not move toward `vmSafeMode only`:
+
+| workload | `AOT + disable_aot`, boot image deoptimized (before) | `AOT + disable_aot`, boot image left alone (after) | `vmSafeMode only` (before) | `vmSafeMode only` (after) |
+|---|---|---|---|---|
+| strings | 35.4ms / 6.5x | 32.3ms / 6.0x | 7.8ms / 1.4x | 4.7ms / 0.9x |
+| hashmap | 100.8ms / 2.5x | 100.5ms / 3.1x | 41.2ms / 1.0x | 42.2ms / 1.3x |
+
+`strings` barely moved (6.5x → 6.0x); `hashmap` moved the wrong way (2.5x → 3.1x). The raw
+before/after deltas alone are not trustworthy here: unrelated, non-boot-classpath workloads swung
+just as widely between the two separate script invocations from device noise alone —
+`accessors` went 203.5x → 31.9x, and nothing about that row is affected by this change. The
+comparison worth trusting is the *within-run* gap between `AOT + disable_aot` and `vmSafeMode
+only`, since both columns are interleaved within one script invocation and share the same thermal
+conditions: strings' gap widened (6.5/1.4 = 4.6x before → 6.0/0.9 = 6.7x after) and hashmap's gap
+held (2.5/1.0 = 2.5x before → 3.1/1.3 = 2.4x after). Neither collapsed toward 1x the way giving up
+`DeoptimizeBootImage()` should have produced if it were the expensive half. Full data:
+`.superpowers/sdd/PLAN/benchmark-before.txt` and `benchmark-after.txt`; full analysis:
+`.superpowers/sdd/PLAN/task-5-report.md`. The split was reverted; `disable_aot()` deoptimizes the
+boot image unconditionally again.
+
+**Implication:** the first-round cost is not specifically `DeoptimizeBootImage()`'s. It comes from
+the runtime being made Java-debuggable at all — the same state that makes every other workload's
+first run 12x–200x slower, with `Jit::TryPatternMatch`'s `IsJavaDebuggable()` gate as the one
+confirmed contributor above. Splitting the boot-image half out as an opt-in parameter was tried and
+measured, and it bought nothing on this device/build. Do not re-attempt it without new evidence.
 
 ## 5. Open problems this plan addresses
 
