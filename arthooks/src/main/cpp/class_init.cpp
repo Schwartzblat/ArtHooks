@@ -160,7 +160,9 @@ bool settle_off_the_stub(JNIEnv *env, ArtMethod *method, jstring name, jobject l
         LOGD("static target %s was on the resolution stub; left it after %d nudges", label, nudges);
     } else {
         LOGW("static target %s is still on the resolution stub after %d nudges; refusing to hook it "
-             "-- FixupStaticTrampolines has not run and would overwrite the hook", label, kMaxNudges);
+             "-- FixupStaticTrampolines has not run for its class, so a backup would capture the stub "
+             "and recurse, and the hook would sit under a fixup that has not happened yet",
+             label, kMaxNudges);
     }
     return left;
 }
@@ -169,8 +171,11 @@ bool settle_off_the_stub(JNIEnv *env, ArtMethod *method, jstring name, jobject l
  * Fallback for when the stub could not be measured: watch the target's own entry point move.
  *
  * Without a stub address there is no way to tell an already-settled class (entry never changes)
- * from one stuck on the stub, so "no change" is reported as not-settled and the caller refuses the
- * hook. That is stricter than necessary but only on a platform where the probe failed validation.
+ * from one stuck on the stub. The common case by far is the former -- most static targets belong to
+ * classes that were visibly initialized long ago -- so "no change" is treated as already settled and
+ * the hook proceeds, with a warning, rather than refusing every such hook. The cost is the rare
+ * stuck-on-the-stub case: a backup installed on it may recurse. Only a throwing <clinit> returns
+ * false. This path is only taken on a platform where the probe failed validation.
  */
 bool settle_by_watching_entry(JNIEnv *env, ArtMethod *method, jstring name, jobject loader,
                               const char *label) {
@@ -193,10 +198,11 @@ bool settle_by_watching_entry(JNIEnv *env, ArtMethod *method, jstring name, jobj
     if (changed) {
         LOGD("(stub probe unavailable) static target %s entry moved after %d nudges", label, nudges);
     } else {
-        LOGW("(stub probe unavailable) static target %s entry did not move after %d nudges; a static "
-             "backup on it may recurse", label, kMaxNudges);
+        LOGW("(stub probe unavailable) static target %s entry did not move after %d nudges; assuming "
+             "its class is already visibly initialized and hooking it -- if it is in fact still on "
+             "the resolution stub, a backup installed on it may recurse", label, kMaxNudges);
     }
-    return changed;
+    return true;
 }
 
 }  // namespace

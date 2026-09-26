@@ -238,15 +238,16 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
     }
 
     // Before the entry point is read or written: a static method of a class ART has initialized but
-    // not yet made *visibly* initialized is parked on the quick resolution stub, and
-    // FixupStaticTrampolines rewrites whatever is there when the class finally settles -- so reading
-    // it captures a stub that re-dispatches through the hook (a static backup then recurses), and
-    // writing it gets undone. ensure_class_visibly_initialized() forces the transition; if a static
-    // target could not be moved off the stub, the hook could not survive, so refuse it -- backup or
-    // not. This runs before warn_if_aot_compiled() so that warning classifies the settled entry.
+    // not yet made *visibly* initialized is parked on the quick resolution stub until
+    // FixupStaticTrampolines runs. Reading it then captures a stub that re-dispatches through the
+    // hook, so a static backup recurses (observed: spec §4.3). Writing it then puts the hook under a
+    // fixup that has not happened yet; that was never observed to lose a hook, but settling first
+    // takes the question off the table. ensure_class_visibly_initialized() forces the transition; a
+    // static target it cannot move off the stub is refused -- backup or not. This runs before
+    // warn_if_aot_compiled() so that warning classifies the settled entry.
     if (!ensure_class_visibly_initialized(env, original, target)) {
         LOGE("refusing to hook a static target still parked on the quick resolution stub: "
-             "FixupStaticTrampolines has not run for its class and would overwrite the hook");
+             "FixupStaticTrampolines has not run for its class");
         return false;
     }
 

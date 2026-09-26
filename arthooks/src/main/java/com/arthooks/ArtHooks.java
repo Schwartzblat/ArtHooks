@@ -150,7 +150,7 @@ public class ArtHooks {
      * static method sits on the quick resolution stub until its class is <em>visibly</em>
      * initialized, and a backup captured from that stub would recurse into the hook -- so this
      * settles the target off the stub before capturing its entry point, and refuses a static target
-     * it cannot move off the stub rather than installing a hook that could not survive.</p>
+     * it cannot move off the stub rather than installing a backup that would recurse.</p>
      *
      * <p>Returns false on failure.
      */

@@ -329,8 +329,11 @@ stops the JIT inlining a hooked target as well as compiling it.
   class is **visibly** initialized. On arm64 that transition is batched: `MarkClassInitialized()`
   sets only `kInitialized` and queues a `VisiblyInitializedCallback`, and `FixupStaticTrampolines()`
   — which installs the real entry point — waits for that callback. So a backup captured from the stub
-  re-dispatches through the hook and recurses, and a hook written onto the stub gets overwritten when
-  the callback fires. The exact trigger is `(aot_code != nullptr || IsNative(flags))` — **not**
+  re-dispatches through the hook and recurses (observed). A hook written onto the stub also sits under
+  a fixup that has not run; reading AOSP suggests the fixup could overwrite it, but Task 1's
+  `static_hook_survives_visible_initialization` wrote one onto the stub under `speed`, forced the
+  fixup, and the hook survived — so treat that as unproven, not as a known failure. The exact trigger
+  is `(aot_code != nullptr || IsNative(flags))` — **not**
   `CanUseAotCode()`, so `disable_aot()` does not touch this branch; what decides it is whether dex2oat
   compiled the method at all. Hence it used to fail under `-m speed`, pass under `-m verify`, and
   never show up in a debug build (a debuggable APK is compiled `verify`).
@@ -341,7 +344,8 @@ stops the JIT inlining a hooked target as well as compiling it.
   startup — the same measure-don't-assume move as `sizeof(ArtMethod)` — from
   `ArtHooks.ResolutionStubProbe`, a class loaded but never initialized whose `static native` method
   sits on the stub by construction (validated: non-null, inside `libart.so`, and different from a
-  resolved native's entry, else it falls back to watching the target's own entry move). A static
+  resolved native's entry, else it falls back to watching the target's own entry move, treating
+  "never moved" as already settled and hooking with a warning that a backup may recurse). A static
   target found on that stub is nudged off it with `Class.forName(name, true, loader)` — which trips
   `ClassLinker::EnsureInitialized`'s per-thread counter and makes ART flush the batch — before
   `install_backup()` or the entry-point write; a target that will not leave the stub is **refused**.

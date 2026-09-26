@@ -156,7 +156,7 @@ called from inside the framework. It should not be automatic.
 
 ## 5. Open problems this plan addresses
 
-### 5.1 Static hooks may be silently clobbered — CLOSED by settling the target first
+### 5.1 Static hooks may be silently clobbered — not reproduced; foreclosed by settling first
 
 `ClassLinker::FixupStaticTrampolines` (`class_linker.cc`) runs when a class becomes visibly
 initialized and does, for every direct method where `NeedsClinitCheckBeforeCall()` holds:
@@ -166,36 +166,33 @@ const void* quick_code = instrumentation->GetCodeForInvoke(method);
 ... UpdateMethodsCode(method, quick_code) ...
 ```
 
-If `hook_function()` wrote its trampoline into a static target's entry point *before* that callback
-fired, the callback would overwrite it. This is the same root as §4.3's backup recursion: a static
-target whose class is not yet visibly initialized is parked on the quick resolution stub, and both
-capturing that stub (backup recurses) and writing over it (hook clobbered) are wrong.
+Read on its own, that suggests a trampoline `hook_function()` wrote into a static target's entry
+point *before* the callback fired could be overwritten by it. That reading was the hypothesis. It
+shares a precondition with §4.3's backup recursion — a static target of a class that is not yet
+visibly initialized, parked on the quick resolution stub — but only the recursion has been observed.
 
-**Task 1 built `HookSelfTest.static_hook_survives_visible_initialization()`** — it hooks
-`LateVisible.describe()`, forces the visible-init flush with a `Class.forName(name, true, loader)`
-loop, and re-checks the hook fired. It passed, but nothing in it confirmed `LateVisible` was ever on
-the stub, so the pass might have been vacuous.
+**What was observed.** Task 1's `HookSelfTest.static_hook_survives_visible_initialization()` hooks
+`LateVisible.describe()` with no settling, forces the visible-init flush with 2048
+`Class.forName(name, true, loader)` calls, and re-checks the hook. It passed under both
+`run-selftest.sh` and `run-aot-selftest.sh speed`. Task 2's library logs now show where that target
+was at hook time on the Pixel 9a / API 36 / arm64 (verbatim `ArtHooks`-tag lines):
 
-**Task 2 makes the library log the fact**, and R8b uses those logs as the evidence. `hook_function`
-now settles a static target off the resolution stub before touching its entry point, logging whether
-the target was on the stub and how many nudges it took to leave. For `LateVisible.describe` on the
-Pixel 9a / API 36 / arm64 device (verbatim `ArtHooks`-tag lines):
+- **`tools/run-selftest.sh`** (debug APK, no AOT code): `static target
+  com.example.arthooks.HookSelfTest$LateVisible is not on the resolution stub; no settling needed`.
+- **`tools/run-aot-selftest.sh speed`**: `static target
+  com.example.arthooks.HookSelfTest$LateVisible was on the resolution stub; left it after 128 nudges`.
 
-- **`tools/run-selftest.sh`** (debug APK, never AOT, `aot_code == nullptr`): `static target
-  com.example.arthooks.HookSelfTest$LateVisible is not on the resolution stub; no settling needed` —
-  a non-native static method with no AOT code starts on the interpreter bridge, not the stub, so
-  neither the recursion nor the clobber is reachable, and Task 1's check passed for that reason.
-- **`tools/run-aot-selftest.sh speed`** (release APK, `-m speed`): `static target
-  com.example.arthooks.HookSelfTest$LateVisible was on the resolution stub; left it after 128 nudges`
-  — here the target *was* stub-parked, and `hook_function` drove the class visibly-initialized
-  (running `FixupStaticTrampolines`) and confirmed the target left the stub **before** writing the
-  hook.
+So under `speed` the target is on the stub at hook time, and 128 nudges were enough to move it off.
+Task 1's run therefore wrote its hook onto the stub and then called `Class.forName` 2048 times — far
+more than the flush needed — and the hook was still there afterwards. The one observation available
+is that a hook written before the fixup survived it (consistent with the fixup leaving alone an entry
+point that is no longer the stub, though that was not checked against the source). The clobber is
+therefore **not reproduced**. The demonstrated failure in this area is §4.3's recursion.
 
-So under `speed` the hook is now installed *after* the fixup, which is exactly why it survives: there
-is no later batched callback left to overwrite it. Task 1's pass was hooking a target that, under
-`speed`, was on the stub — the pass would have been at risk of both the clobber and (with a backup)
-the recursion; settling first closes both. §5.1 is closed by construction rather than by "not
-reproduced," and the same mechanism fixes §4.3 — success criterion 1 is met: 27/27 under `-m speed`.
+**What Task 2 changes.** `hook_function` now settles a static target off the resolution stub before
+reading or writing its entry point, and refuses one it cannot move off. That forecloses the clobber
+by construction — no hook is written while a fixup is pending — whether or not the clobber is
+reproducible, and it is what fixes §4.3: success criterion 1 is met, 27/27 under `-m speed`.
 
 ### 5.2 `disable_aot()` misses already-linked classes
 

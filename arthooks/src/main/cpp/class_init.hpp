@@ -43,8 +43,14 @@ bool ensure_class_initialized(JNIEnv *env, jobject executable);
  *
  * Returns true when the class is believed visibly initialized (including when it never needed to
  * be), false when a static target was still on the stub after the budget or a <clinit> threw. The
- * caller must refuse a hook when this returns false: the stub means FixupStaticTrampolines has not
- * run, and it rewrites the entry point unconditionally when it does, so the hook could not survive.
+ * caller refuses a hook when this returns false. A target still on the stub is one whose
+ * FixupStaticTrampolines has not run: a backup captured there would recurse (observed, spec §4.3),
+ * and whether a hook written there would outlive the later fixup is untested -- Task 1's one
+ * observation is that it did -- so the hook is refused rather than installed on that assumption.
+ *
+ * If the stub could not be measured, the fallback watches the target's own entry point instead and
+ * treats "never moved" as already settled: it returns true with a warning, because the common case
+ * is a class visibly initialized long ago, and refusing all of those would be worse.
  */
 bool ensure_class_visibly_initialized(JNIEnv *env, jobject executable, ArtMethod *method);
 

@@ -464,11 +464,14 @@ waits for the declaring class to become *visibly* initialized. On arm64 that tra
 behind a `VisiblyInitializedCallback`, so a class can be initialized and running for a long time with
 its static methods still parked on the stub.
 
-That stub is a problem for hooking. A backup captured while the target is on it re-dispatches through
+That stub is a problem for backups. A backup captured while the target is on it re-dispatches through
 the stub, which re-reads the (now hooked) entry point and lands back in the replacement — the backup
-recurses until the stack overflows. And a hook *written* while the target is on the stub is
-overwritten when `FixupStaticTrampolines` finally runs. Both were real: before this was handled, a
-release build compiled `speed` failed four self-test cases with a `StackOverflowError`.
+recurses until the stack overflows. That one is real: before this was handled, a release build
+compiled `speed` failed four self-test cases with a `StackOverflowError`. A hook *written* while the
+target is on the stub also sits under a `FixupStaticTrampolines` that has not run yet; reading AOSP
+suggests the fixup could overwrite it, but that was never observed — a self-test hook written onto
+the stub survived a forced fixup — so it is a question settling first avoids, not a demonstrated
+failure.
 
 ArtHooks settles the target first. It **measures the stub's address at startup** — the same
 measure-don't-assume move used for `sizeof(ArtMethod)` — from `ArtHooks.ResolutionStubProbe`, a class
@@ -478,7 +481,9 @@ before it is trusted. When a static target is found on that stub, `hook_function
 `Class.forName(name, true, loader)` — which trips `ClassLinker::EnsureInitialized`'s per-thread
 counter and makes ART flush the visible-initialization batch — until its entry point leaves the stub,
 then captures the real body. A static target that will not leave the stub is **refused** rather than
-hooked into an entry point `FixupStaticTrampolines` would overwrite. This narrows one residual case
+hooked while its fixup is still pending. If the stub's address cannot be measured, `hook_function`
+instead watches the target's own entry point, treats "never moved" as already settled, and hooks it
+with a warning that a backup may recurse. This narrows one residual case
 rather than closing it: a static target whose class is not visibly initialized but which is *not* on
 the stub (no AOT code, e.g. a debug build, where it starts on the interpreter bridge) is not settled —
 but that case does not recurse, because the interpreter bridge runs the original body directly.
