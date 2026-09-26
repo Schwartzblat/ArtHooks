@@ -312,10 +312,18 @@ stops the JIT inlining a hooked target as well as compiling it.
   get that fixup, and nterp reads `declaring_class_` on every call. `backup_survives_a_relocating_gc`
   pins this down. (An earlier version of this file, and of the code, used a malloc'd snapshot; it
   does not any more.)
-- **Unhooking exists, but trampolines are never freed.** `unhook_function()` pairs `hook_registry.cpp`'s
-  `forget_hook()`, which hands back the entry point a hook displaced, with `art_method.cpp`'s
-  `set_entry_point()`, which writes it back. It restores that entry point one layer at a
-  time: hooking the same method twice chains, second hook outermost -- the second backup captures an
+- **Unhooking exists, but trampolines are never freed.** `hook_registry.cpp`'s `install_hook()` and
+  `remove_hook()` do the `ArtMethod` write themselves, under the registry's own lock, precisely so a
+  hook and an unhook of the *same* target cannot interleave -- an earlier version of this code split
+  "read/write the entry point" from "update the registry" into two separately-locked steps, which left
+  two gaps: a failed restoring write could still drop the registry entry (leaving a live trampoline
+  with nothing naming it, so `is_hooked()` would answer wrongly and a second unhook would write a
+  now-wrong "previous" address over a still-live outer hook), and a stale record -- one whose entry
+  point ART had since overwritten by some mechanism of its own -- could get its "previous" address
+  written back on top of whatever ART had put there. `remove_hook()` now re-checks the live entry
+  point against the record before trusting it, and only drops a record once its restoring write is
+  *verified*; a write that does not take leaves the record in place rather than losing it. Hooking the
+  same method twice still chains, second hook outermost -- the second backup captures an
   already-hooked target's entry point, so calling through it runs the first hook, which calls through
   to the original (`RuntimeCases.chained_hooks` pins that ordering down) -- and the first
   `unhook_function()` call removes only the outer layer, leaving the inner hook in place and working;

@@ -278,11 +278,12 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
     if (trampoline == nullptr) {
         return false;
     }
-    void *previous_entry = get_entry_point(target);
-    if (!set_entry_point(target, trampoline)) {
+    // install_hook() reads the current entry point, writes the trampoline, and records the pair
+    // under one lock -- the same lock unhook_function()'s remove_hook() takes -- so a hook and an
+    // unhook of this target cannot interleave.
+    if (!install_hook(target, trampoline)) {
         return false;
     }
-    remember_hook(target, previous_entry, trampoline);
 
     LOGI("hooked ArtMethod %p with %p", target, hook);
     return true;
@@ -357,6 +358,11 @@ Java_com_arthooks_ArtHooks_hook_1function__Ljava_lang_reflect_Executable_2Ljava_
  * The trampoline is not freed. Another thread can be inside it right now, there is no way to know
  * when it is not, and trampolines are bump-allocated out of a shared page that nothing can return
  * memory to anyway.
+ *
+ * remove_hook() does the checking, the write and the registry update as one step under its lock, so
+ * this cannot interleave with hook_function()'s install_hook() (nor with another unhook_function())
+ * on the same target: it will not restore a stale "previous" address over a hook that is not the one
+ * on record any more, and a write that does not take leaves the record in place rather than losing it.
  */
 bool unhook_function(JNIEnv *env, jobject method) {
     if (!g_initialized) {
@@ -374,16 +380,12 @@ bool unhook_function(JNIEnv *env, jobject method) {
         return false;
     }
 
-    void *previous_entry = nullptr;
-    if (!forget_hook(target, &previous_entry)) {
-        LOGW("ArtMethod %p is not hooked", target);
-        return false;
-    }
-    if (!set_entry_point(target, previous_entry)) {
+    void *restored_entry = nullptr;
+    if (!remove_hook(target, &restored_entry)) {
         return false;
     }
 
-    LOGI("unhooked ArtMethod %p, entry point restored to %p", target, previous_entry);
+    LOGI("unhooked ArtMethod %p, entry point restored to %p", target, restored_entry);
     return true;
 }
 

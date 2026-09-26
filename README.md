@@ -420,9 +420,14 @@ runs both.
   hooking have been called thousands of times.
 - **Unhooking exists, but nothing is ever freed.** `unhook_function()` restores the entry point a
   hook displaced, one layer at a time — hooking the same method twice chains, second hook outermost,
-  and each unhook call undoes exactly the outermost layer still standing. The trampoline itself is
-  never freed: another thread can be inside it right now, there is no way to know when none is, and
-  trampolines are bump-allocated out of a shared page nothing can return memory to anyway.
+  and each unhook call undoes exactly the outermost layer still standing. Before restoring anything it
+  checks that the entry point still holds *that* hook's trampoline; if ART has since replaced it by
+  some mechanism of its own, the recorded address is no longer trustworthy, so nothing is written and
+  that stale record is discarded instead. A hook and an unhook of the same method cannot interleave,
+  either — the check, the write and the bookkeeping happen as one step under an internal lock. The
+  trampoline itself is never freed: another thread can be inside it right now, there is no way to know
+  when none is, and trampolines are bump-allocated out of a shared page nothing can return memory to
+  anyway.
   **It does not synchronize with calls in flight** — a thread already inside the replacement stays
   there, and one that already loaded the (now-stale) entry point still jumps to the trampoline. Unhook
   only when you know the method is quiet.

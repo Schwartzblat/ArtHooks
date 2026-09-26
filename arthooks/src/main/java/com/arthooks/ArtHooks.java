@@ -174,6 +174,14 @@ public class ArtHooks {
      * earlier hook in place and working, the second restores the original. Returns false if the
      * method is not hooked.
      *
+     * <p>Before restoring anything, this checks that the entry point still holds the trampoline this
+     * hook installed. If ART has since replaced it by some mechanism of its own — class
+     * initialization, JIT compilation, deoptimization — the address that would otherwise be restored
+     * is no longer trustworthy, so nothing is written; that stale record is discarded and this
+     * returns false. A hook and an unhook of the same method can never interleave, either: the check,
+     * the write and the bookkeeping all happen under one internal lock, so two such calls racing each
+     * other on the same method run one at a time, start to finish, rather than tearing.
+     *
      * <p>The trampoline is not freed — another thread may be executing it, and there is no way to
      * know when none is. Nor is {@code kAccCompileDontBother} cleared, because other hooks in a
      * chain may still depend on ART not compiling the method.
