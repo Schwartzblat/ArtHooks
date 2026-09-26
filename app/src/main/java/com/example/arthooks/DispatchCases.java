@@ -70,7 +70,9 @@ class DispatchCases {
         return static_backup(value) * 10;
     }
 
-    // A static target's backup keeps a body: a native one recurses back into the replacement.
+    // A static target's backup keeps a Java body as a canary: if the entry-point swap were lost, the
+    // replacement would return this MIN_VALUE instead of the original's answer. hook_function settles
+    // the target off the quick resolution stub before capture, so calling through runs the original.
     static int static_backup(int value) {
         Log.e(TAG, "static_backup ran its own body");
         return Integer.MIN_VALUE;

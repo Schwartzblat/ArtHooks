@@ -146,9 +146,11 @@ public class ArtHooks {
      * rather than installed, because the alternative is a hook that reports success and returns the
      * wrong value from then on.
      *
-     * <p>A {@code static} target is the exception, and is only warned about: backing one up is
-     * unreliable in a release build whether or not the backup is native, and the rule that would
-     * make it work is not known yet. See the TODO in the README.</p>
+     * <p>A {@code static} target does not need the native rule. An AOT-compiled or {@code native}
+     * static method sits on the quick resolution stub until its class is <em>visibly</em>
+     * initialized, and a backup captured from that stub would recurse into the hook -- so this
+     * settles the target off the stub before capturing its entry point, and refuses a static target
+     * it cannot move off the stub rather than installing a hook that could not survive.</p>
      *
      * <p>Returns false on failure.
      */
@@ -181,5 +183,33 @@ public class ArtHooks {
     }
 
     private static void layout_probe_b() {
+    }
+
+    /**
+     * A class ART parks on the quick resolution stub, so the native side can measure that stub's
+     * address and later tell whether a static target is still sitting on it.
+     *
+     * <p>{@code Instrumentation::GetInitialEntrypoint} gives every method where
+     * {@code NeedsClinitCheckBeforeCall()} holds -- {@code static && !constructor} -- the quick
+     * resolution stub when the method is {@code native} (or AOT-compiled), and leaves it there until
+     * {@code ClassLinker::FixupStaticTrampolines} runs for its class. So a {@code static native}
+     * method of a class that is loaded but never initialized has the stub as its entry point, by
+     * construction.
+     *
+     * <p>This is a separate class, so it cannot disturb the {@code layout_probe_a/b} adjacency in
+     * {@code ArtHooks}' own method list. Its {@code <clinit>} calls a native ({@link System#nanoTime})
+     * that dex2oat cannot fold at build time, so no app image can pre-initialize it. The native side
+     * reaches {@code stub_probe} with {@code getDeclaredMethod} (which does not initialize the class)
+     * and never with {@code GetStaticMethodID} (which does), and never calls it -- the whole point is
+     * that it stays unresolved on the stub.
+     */
+    static final class ResolutionStubProbe {
+        static long marker;
+
+        static {
+            marker = System.nanoTime();
+        }
+
+        static native void stub_probe();
     }
 }

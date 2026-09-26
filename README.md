@@ -12,12 +12,12 @@ demo that also carries the test suite).
 
 ## Status
 
-Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 23 self-test checks
-covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival and
-concurrent installation. All 23 pass in a debug build, and all 23 in a **release** build too, which
-is new — see [AOT](#aot-and-why-hooks-used-to-break-in-release-builds). The one remaining gap is a
-release build compiled `speed`: 19 of 23 pass, and the four that do not are all the same defect,
-backing up a `static` target, see [TODO](#todo).
+Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 27 self-test checks
+covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival,
+concurrent installation and static targets whose class is not yet visibly initialized. All 27 pass
+in a debug build, all 27 in a **release** build compiled `verify`, and all 27 in a release build
+compiled `speed` — the harshest case, where dex2oat has compiled everything. See
+[AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
 
 Four ABIs are built. Only arm64-v8a has been exercised on hardware; the armeabi-v7a, x86_64 and x86
 trampoline encodings were verified by disassembling the emitted bytes against the NDK assembler.
@@ -64,8 +64,10 @@ the wrong value from then on. A native method has no body to copy.
 static native boolean gate_backup(Object thiz);
 ```
 
-A non-native backup is refused rather than installed, for a target that is not static. Static targets
-are exempt only because the rule there is not yet known; see [TODO](#todo).
+A non-native backup is refused rather than installed, for a target that is not static. A `static`
+target's backup does not need this — a static backup is settled off the quick resolution stub before
+its entry point is captured (see [below](#static-targets-and-the-resolution-stub)), so calling
+through it runs the original body rather than re-entering the hook.
 
 ## AOT, and why hooks used to break in release builds
 
@@ -451,50 +453,37 @@ runs both.
 - **The `ArtMethod` mirror in `art_method.hpp` is hand-maintained.** Nothing indexes it — the layout
   is measured at runtime — but a mismatch against the measured size is logged as a warning and means
   the struct no longer describes that platform.
-- **The backup's snapshot is not visited by the GC.** It holds a `GcRoot` to the declaring class,
-  which is safe only because ART allocates `mirror::Class` as non-movable.
 
-## TODO
+## Static targets and the resolution stub
 
-- **Backing up a `static` target recurses.** Calling the backup lands back in the replacement
-  instead of the original body, until the stack overflows. Reproduced by the two `StaticTarget`
-  cases in `ArityCases`, by `DispatchCases.static_target_with_backup` and by
-  `RuntimeCases.chained_hooks` — the four release-build failures.
+A `static`, non-constructor method that dex2oat compiled (or that is `native`) does not start on its
+real entry point. `Instrumentation::GetInitialEntrypoint` gives every method where
+`NeedsClinitCheckBeforeCall()` holds — exactly `IsStatic() && !IsConstructor()` — the quick
+**resolution stub**, and leaves it there until `ClassLinker::FixupStaticTrampolines` runs, which
+waits for the declaring class to become *visibly* initialized. On arm64 that transition is batched
+behind a `VisiblyInitializedCallback`, so a class can be initialized and running for a long time with
+its static methods still parked on the stub.
 
-  **The cause is known**, from AOSP rather than from guesswork. `Instrumentation::GetInitialEntrypoint`
-  gives a method the quick *resolution stub* when `ArtMethod::NeedsClinitCheckBeforeCall()` holds —
-  which is exactly `IsStatic() && !IsConstructor()` — and leaves it there until the declaring class
-  becomes **visibly** initialized. On arm64 that transition is batched:
-  `ClassLinker::MarkClassInitialized` only sets `kInitialized` and queues the class for a
-  `VisiblyInitializedCallback`, and `ClassLinker::FixupStaticTrampolines` — the thing that installs
-  the real entry point — does not run until that callback fires. So `install_backup` captures the
-  resolution stub, bakes it into the backup's trampoline, and calling the backup re-enters the stub,
-  which re-reads `entry_point_from_quick_compiled_code_` — by then the hook — and lands in the
-  replacement. Round and round.
+That stub is a problem for hooking. A backup captured while the target is on it re-dispatches through
+the stub, which re-reads the (now hooked) entry point and lands back in the replacement — the backup
+recurses until the stack overflows. And a hook *written* while the target is on the stub is
+overwritten when `FixupStaticTrampolines` finally runs. Both were real: before this was handled, a
+release build compiled `speed` failed four self-test cases with a `StackOverflowError`.
 
-  The trigger is precise. `GetInitialEntrypoint` reads:
+ArtHooks settles the target first. It **measures the stub's address at startup** — the same
+measure-don't-assume move used for `sizeof(ArtMethod)` — from `ArtHooks.ResolutionStubProbe`, a class
+that is loaded but never initialized so its `static native` method sits on the stub by construction;
+the address is validated (non-null, inside `libart.so`, and different from a resolved native's entry)
+before it is trusted. When a static target is found on that stub, `hook_function` nudges it off with
+`Class.forName(name, true, loader)` — which trips `ClassLinker::EnsureInitialized`'s per-thread
+counter and makes ART flush the visible-initialization batch — until its entry point leaves the stub,
+then captures the real body. A static target that will not leave the stub is **refused** rather than
+hooked into an entry point `FixupStaticTrampolines` would overwrite. This narrows one residual case
+rather than closing it: a static target whose class is not visibly initialized but which is *not* on
+the stub (no AOT code, e.g. a debug build, where it starts on the interpreter bridge) is not settled —
+but that case does not recurse, because the interpreter bridge runs the original body directly.
 
-  ```cpp
-  return (aot_code != nullptr || IsNative(flags)) ? GetQuickResolutionStub()
-                                                  : GetQuickToInterpreterBridge();
-  ```
-
-  — note `aot_code != nullptr`, *not* `CanUseAotCode()`, so `disable_aot()` has no effect on this
-  branch. What decides it is whether dex2oat compiled the method at all. That accounts for every
-  observation: static-only (instance methods and constructors never reach that branch), independent
-  of arity and of `native`, reproducing under `compile -m speed` and not under `-m verify` — and
-  therefore not in a debug build, since a debuggable APK is compiled `verify`. The earlier note here
-  blamed debuggability itself; that was the correlation, not the cause. `kRuntimeISA == kX86` skips
-  the batching entirely — *"thanks to the x86 memory model"* — so this should not reproduce on x86.
-
-  Workaround until it is fixed: don't pass a backup for a `static` target in an AOT-compiled build,
-  or keep the app off AOT (`android:vmSafeMode`, above), which removes the trigger.
-
-  Not fixed, because the repair needs `ClassLinker::MakeInitializedClassesVisiblyInitialized`, and
-  reaching it means finding `Runtime::GetClassLinker()`'s result — an inline accessor over a struct
-  offset that cannot be measured, which is the one thing this library refuses to guess at.
-  `hook_function` still logs a warning and installs anyway. Instance-method and constructor targets
-  are unaffected.
+Instance-method and constructor targets never reach this branch, so they are unaffected.
 
 ## Layout
 

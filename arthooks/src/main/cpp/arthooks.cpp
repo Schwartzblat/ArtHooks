@@ -89,29 +89,11 @@ bool modifiers_of(JNIEnv *env, jobject executable, jint *modifiers_out) {
  * fails under `compile -m speed`, which is why an app can work when it is installed and start
  * misbehaving hours later once background dexopt has compiled it.
  *
- * A static target is a separate, unfixed defect, and the backup's shape has nothing to do with it:
- * backing one up recurses into the replacement until the stack runs out, with or without `native`.
- * The cause is ART's. Instrumentation::GetInitialEntrypoint() reads, for a method where
- * NeedsClinitCheckBeforeCall() holds -- which is exactly IsStatic() && !IsConstructor():
- *
- *     return (aot_code != nullptr || IsNative(flags)) ? GetQuickResolutionStub()
- *                                                     : GetQuickToInterpreterBridge();
- *
- * so a static method whose oat file carries code for it starts on the *resolution stub*, and keeps
- * it until ClassLinker::FixupStaticTrampolines() runs -- which waits for the declaring class to
- * become *visibly* initialized, a transition arm64 batches behind a VisiblyInitializedCallback.
- * install_backup() captures that stub, and calling the backup re-enters it, where it re-reads
- * entry_point_from_quick_compiled_code_ -- by then the hook -- and lands in the replacement.
- *
- * Note the condition is `aot_code != nullptr`, not CanUseAotCode(): disable_aot_code() does not
- * affect this branch. What decides it is whether dex2oat compiled the method at all, which is why
- * this reproduces under `compile -m speed` and not under `-m verify`, and why it looked like a
- * debug-versus-release difference -- a debuggable APK is compiled `verify`.
- *
- * Repairing it needs ClassLinker::MakeInitializedClassesVisiblyInitialized(), and reaching that
- * means finding Runtime::GetClassLinker()'s result, an inline accessor over a struct offset this
- * library has no way to measure. So: warn, install anyway, and let the caller decide. See
- * ArityCases in the self-test.
+ * A static target does not need the native rule. It has its own hazard -- an AOT-compiled or native
+ * static method sits on the quick resolution stub until its class is *visibly* initialized, and a
+ * backup built on that stub re-dispatches through the hook and recurses -- but that is handled before
+ * install_backup() runs: ensure_class_visibly_initialized() settles the target off the stub first, or
+ * hook_function() refuses the target. See class_init.cpp.
  */
 bool reject_mismatched_backup(JNIEnv *env, jobject original, jobject backup) {
     jint target_modifiers = 0;
@@ -133,14 +115,6 @@ bool reject_mismatched_backup(JNIEnv *env, jobject original, jobject backup) {
              "swap invisible and leaves the backup silently returning its own answer. Declare it "
              "`static native` with no body, keeping the replacement's signature.");
         return true;
-    }
-    if (target_is_static) {
-        LOGW("backing up a static target is unreliable, whether or not the backup is native: while "
-             "the target's class is not yet *visibly* initialized ART leaves an AOT-compiled static "
-             "method on the resolution stub, and a backup built on that stub re-dispatches through "
-             "the hook and recurses until the stack overflows. It is safe when dex2oat did not "
-             "compile the target (a `verify` build). Installing it anyway -- nothing here can force "
-             "that class transition.");
     }
     return false;
 }
@@ -263,6 +237,19 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
         return false;
     }
 
+    // Before the entry point is read or written: a static method of a class ART has initialized but
+    // not yet made *visibly* initialized is parked on the quick resolution stub, and
+    // FixupStaticTrampolines rewrites whatever is there when the class finally settles -- so reading
+    // it captures a stub that re-dispatches through the hook (a static backup then recurses), and
+    // writing it gets undone. ensure_class_visibly_initialized() forces the transition; if a static
+    // target could not be moved off the stub, the hook could not survive, so refuse it -- backup or
+    // not. This runs before warn_if_aot_compiled() so that warning classifies the settled entry.
+    if (!ensure_class_visibly_initialized(env, original, target)) {
+        LOGE("refusing to hook a static target still parked on the quick resolution stub: "
+             "FixupStaticTrampolines has not run for its class and would overwrite the hook");
+        return false;
+    }
+
     warn_if_aot_compiled(target);
 
     // Before anything is written: if the target is currently hot, the JIT may already have queued it
@@ -349,6 +336,16 @@ JNIEXPORT jboolean JNICALL
 Java_com_arthooks_ArtHooks_hook_1function__Ljava_lang_reflect_Executable_2Ljava_lang_reflect_Executable_2Ljava_lang_reflect_Executable_2(
         JNIEnv *env, jclass clazz, jobject original, jobject replacement, jobject backup) {
     return hook_function(env, original, replacement, backup) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Exists only so tools/check-jni-symbols.sh finds a symbol for the probe method declared in
+// ArtHooks.java. It is never registered and never called: its whole purpose is to sit unresolved on
+// the quick resolution stub so init() can measure that stub's address. Calling it -- which would
+// require its class to be initialized first -- would defeat the measurement.
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arthooks_ArtHooks_00024ResolutionStubProbe_stub_1probe(JNIEnv *env, jclass clazz) {
+    LOGE("ArtHooks.ResolutionStubProbe.stub_probe was called; it never should be");
 }
 
 JNIEXPORT jint JNICALL

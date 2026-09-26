@@ -2,6 +2,8 @@ package com.example.arthooks;
 
 import android.util.Log;
 
+import com.arthooks.ArtHooks;
+
 import static com.example.arthooks.Checks.TAG;
 import static com.example.arthooks.Checks.declared_method;
 import static com.example.arthooks.Checks.fail;
@@ -41,6 +43,9 @@ public class HookSelfTest {
                     && backup_survives_a_relocating_gc()
                     && static_target_is_hooked_and_initialized()
                     && static_hook_survives_visible_initialization()
+                    && static_backup_on_a_fresh_class()
+                    && settled_and_single_static_classes()
+                    && throwing_class_initializer_fails_the_hook()
                     && SignatureCases.check()
                     && DispatchCases.check()
                     && RuntimeCases.check()
@@ -266,5 +271,116 @@ public class HookSelfTest {
                     + greeting + "\"");
         }
         return pass("static hook survived its class becoming visibly initialized");
+    }
+
+    // --- a static backup on a class the hook itself initialized ---------------------------------
+
+    /** A second static method, so the check below has a sibling to compare entry points against. */
+    static class TwoStatics {
+        static int marker = 1;
+
+        static int first() {
+            return 1;
+        }
+
+        static int second() {
+            return 2;
+        }
+    }
+
+    public static int first_replacement() {
+        return 10;
+    }
+
+    public static native int first_backup();
+
+    /**
+     * Hooks a static method with a backup in the state that used to recurse: the class is
+     * initialized by the hook itself, so it is still only kInitialized when the entry point is
+     * captured, and an AOT build leaves it on the quick resolution stub.
+     */
+    private static boolean static_backup_on_a_fresh_class() {
+        if (!hook(declared_method(TwoStatics.class, "first"),
+                declared_method(HookSelfTest.class, "first_replacement"),
+                declared_method(HookSelfTest.class, "first_backup"))) {
+            return false;
+        }
+        int result = TwoStatics.first();
+        if (result != 10) {
+            return fail("static target with a backup on a fresh class -> " + result
+                    + ", expected 10");
+        }
+        return pass("static target with a backup hooked on a class the hook itself initialized");
+    }
+
+    // --- a settled class, and a class with a single static method -------------------------------
+
+    /** Review Focus 1 and 3: a settled class, and a class with a single static method. */
+    static class OneStatic {
+        static int only() {
+            return 1;
+        }
+    }
+
+    public static int only_replacement() {
+        return 7;
+    }
+
+    private static boolean settled_and_single_static_classes() {
+        // Settled: TwoStatics was initialized and hooked in the previous check, so by now its
+        // transition has happened. Hooking its other method must not need any nudging.
+        long started = System.nanoTime();
+        if (!hook(declared_method(TwoStatics.class, "second"),
+                declared_method(HookSelfTest.class, "only_replacement"))) {
+            return false;
+        }
+        long elapsed_ms = (System.nanoTime() - started) / 1_000_000L;
+        if (TwoStatics.second() != 7) {
+            return fail("hooking an already-settled static target did not take");
+        }
+        if (elapsed_ms > 250) {
+            return fail("hooking an already-settled static target took " + elapsed_ms
+                    + "ms, so the settled-class check is not short-circuiting the nudge loop");
+        }
+
+        // Single static method: nothing to compare against, so this must still settle off the stub
+        // and hook rather than being skipped or refused.
+        if (!hook(declared_method(OneStatic.class, "only"),
+                declared_method(HookSelfTest.class, "only_replacement"))) {
+            return false;
+        }
+        if (OneStatic.only() != 7) {
+            return fail("hooking a class with a single static method did not take");
+        }
+        return pass("settled classes short-circuit, and a single-static-method class still hooks");
+    }
+
+    // --- a class initializer that throws --------------------------------------------------------
+
+    /** Review Focus 2: a class initializer that throws must fail the hook, not loop. */
+    static class Exploding {
+        static {
+            if (Boolean.parseBoolean("true")) {
+                throw new IllegalStateException("boom");
+            }
+        }
+
+        static int value() {
+            return 1;
+        }
+    }
+
+    public static int exploding_replacement() {
+        return 2;
+    }
+
+    private static boolean throwing_class_initializer_fails_the_hook() {
+        boolean hooked = ArtHooks.hook_function(
+                declared_method(Exploding.class, "value"),
+                declared_method(HookSelfTest.class, "exploding_replacement"));
+        if (hooked) {
+            return fail("hooking a class whose <clinit> throws reported success");
+        }
+        return pass("a throwing class initializer fails the hook instead of looping");
     }
 }

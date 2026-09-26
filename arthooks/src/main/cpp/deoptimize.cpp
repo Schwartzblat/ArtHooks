@@ -153,18 +153,23 @@ bool aot_code_disabled() {
     return g_disabled;
 }
 
-bool is_aot_code(const void *entry_point) {
-    if (entry_point == nullptr) {
-        return false;
-    }
+namespace {
 
+/**
+ * Copies the file path backing the mapping that contains `address` into `path_out`.
+ *
+ * Returns false when the address is in no mapping at all; an anonymous mapping yields an empty
+ * string. The single owner of the /proc/self/maps walk, shared by is_aot_code() and is_in_libart().
+ */
+bool mapping_path_for(const void *address, char *path_out, size_t path_cap) {
+    path_out[0] = '\0';
     FILE *maps = fopen("/proc/self/maps", "re");
     if (maps == nullptr) {
         return false;
     }
 
-    const size_t address = reinterpret_cast<size_t>(entry_point);
-    bool is_aot = false;
+    const size_t target = reinterpret_cast<size_t>(address);
+    bool found = false;
     char line[512];
     while (fgets(line, sizeof(line), maps) != nullptr) {
         size_t start = 0;
@@ -175,7 +180,7 @@ bool is_aot_code(const void *entry_point) {
         if (sscanf(line, "%zx-%zx %*4s %*x %*s %*u %n", &start, &end, &path_offset) < 2) {
             continue;
         }
-        if (address < start || address >= end) {
+        if (target < start || target >= end) {
             continue;
         }
 
@@ -183,16 +188,57 @@ bool is_aot_code(const void *entry_point) {
         while (*path == ' ') {
             path++;
         }
-        // An anonymous mapping is the JIT's code cache, and every ART stub -- nterp, the
-        // interpreter bridge, the resolution trampoline -- is inside libart.so. Anything else
-        // backed by a file is an oat file, which is to say compiled code.
-        is_aot = *path == '/' && strstr(path, ".so") == nullptr;
-        if (is_aot) {
-            LOGD("entry point %p is AOT code from %s", entry_point, path);
+        // fgets keeps the trailing newline, which would otherwise end up inside the copied path.
+        size_t length = strlen(path);
+        while (length > 0 && (path[length - 1] == '\n' || path[length - 1] == '\r')) {
+            length--;
         }
+        if (length >= path_cap) {
+            length = path_cap - 1;
+        }
+        memcpy(path_out, path, length);
+        path_out[length] = '\0';
+        found = true;
         break;
     }
 
     fclose(maps);
+    return found;
+}
+
+}  // namespace
+
+bool is_aot_code(const void *entry_point) {
+    if (entry_point == nullptr) {
+        return false;
+    }
+
+    char path[512];
+    if (!mapping_path_for(entry_point, path, sizeof(path))) {
+        return false;
+    }
+
+    // An anonymous mapping is the JIT's code cache, and every ART stub -- nterp, the interpreter
+    // bridge, the resolution trampoline -- is inside libart.so. Anything else backed by a file is an
+    // oat file, which is to say compiled code.
+    const bool is_aot = path[0] == '/' && strstr(path, ".so") == nullptr;
+    if (is_aot) {
+        LOGD("entry point %p is AOT code from %s", entry_point, path);
+    }
     return is_aot;
+}
+
+bool is_in_libart(const void *address) {
+    if (address == nullptr) {
+        return false;
+    }
+
+    char path[512];
+    if (!mapping_path_for(address, path, sizeof(path))) {
+        return false;
+    }
+
+    const char *last_slash = strrchr(path, '/');
+    const char *base = (last_slash != nullptr) ? last_slash + 1 : path;
+    return strcmp(base, "libart.so") == 0;
 }
