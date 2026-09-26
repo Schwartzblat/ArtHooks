@@ -57,6 +57,11 @@ signed="$work/app-release.apk"
     --ks-key-alias androiddebugkey "$signed"
 
 adb wait-for-device
+# A prior run-selftest.sh install may be signed with whatever debug key Gradle's own signing config
+# used, which is not necessarily this script's $HOME/.android/debug.keystore -- on a fresh machine
+# the two can differ, and installing a release APK signed with a different key over that fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE. Drop whatever is there first; "not installed" is fine.
+adb uninstall "$package" > /dev/null 2>&1 || true
 # -d allows the downgrade from whatever versionCode a debug install left behind.
 adb install -r -d "$signed" > /dev/null
 
