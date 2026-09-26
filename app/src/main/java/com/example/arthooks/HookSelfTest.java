@@ -40,6 +40,7 @@ public class HookSelfTest {
             if (hook_and_backup_survive_the_jit()
                     && backup_survives_a_relocating_gc()
                     && static_target_is_hooked_and_initialized()
+                    && static_hook_survives_visible_initialization()
                     && SignatureCases.check()
                     && DispatchCases.check()
                     && RuntimeCases.check()
@@ -204,5 +205,66 @@ public class HookSelfTest {
             return fail("static target returned \"" + greeting + "\"");
         }
         return pass("static target hooked, and its class initialiser ran first");
+    }
+
+    // --- a static hook outliving its class's visible initialization -----------------------------
+
+    /**
+     * Untouched until the hook runs, so hooking it is what first initializes the class -- which is
+     * the state the check below is about.
+     */
+    static class LateVisible {
+        static int marker = 1;
+
+        static String describe() {
+            return "original";
+        }
+    }
+
+    /** Replaces {@link LateVisible#describe}. Static target, so no receiver to stand in for. */
+    public static String describe_replacement() {
+        return "hooked";
+    }
+
+    /**
+     * Checks that a hook on a static method is still there once ART makes the class *visibly*
+     * initialized.
+     *
+     * <p>On arm64 that transition is batched: ClassLinker::MarkClassInitialized only sets
+     * kInitialized and queues a VisiblyInitializedCallback. When the callback finally runs,
+     * ClassLinker::FixupStaticTrampolines rewrites the entry point of every direct method that
+     * needs a class-init check -- which is where the hook lives. Hooking therefore has a window in
+     * which it appears to work and is then silently undone.
+     *
+     * <p>Class.forName(name, true, loader) reaches ClassLinker::EnsureInitialized, which bumps a
+     * per-thread counter and asks for the transition once it trips, so calling it in a loop is what
+     * forces the flush rather than waiting for one to happen by chance.
+     */
+    private static boolean static_hook_survives_visible_initialization() {
+        if (!hook(declared_method(LateVisible.class, "describe"),
+                declared_method(HookSelfTest.class, "describe_replacement"))) {
+            return false;
+        }
+
+        if (!"hooked".equals(LateVisible.describe())) {
+            return fail("the static hook was not in place even before the class settled");
+        }
+
+        String name = LateVisible.class.getName();
+        ClassLoader loader = LateVisible.class.getClassLoader();
+        for (int i = 0; i < 2048; i++) {
+            try {
+                Class.forName(name, true, loader);
+            } catch (ClassNotFoundException e) {
+                return fail("could not re-resolve " + name);
+            }
+        }
+
+        String greeting = LateVisible.describe();
+        if (!"hooked".equals(greeting)) {
+            return fail("the static hook was lost once the class became visibly initialized -> \""
+                    + greeting + "\"");
+        }
+        return pass("static hook survived its class becoming visibly initialized");
     }
 }

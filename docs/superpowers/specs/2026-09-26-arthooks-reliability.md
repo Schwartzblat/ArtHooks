@@ -156,7 +156,7 @@ called from inside the framework. It should not be automatic.
 
 ## 5. Open problems this plan addresses
 
-### 5.1 Static hooks may be silently clobbered — UNVERIFIED, highest priority
+### 5.1 Static hooks may be silently clobbered — CLOSED, not reproduced
 
 `ClassLinker::FixupStaticTrampolines` (`class_linker.cc`) runs when a class becomes visibly
 initialized and does, for every direct method where `NeedsClinitCheckBeforeCall()` holds:
@@ -174,8 +174,33 @@ nothing reporting an error.
 `HookSelfTest.static_target_is_hooked_and_initialized` cannot catch this: it checks immediately,
 before the batch flushes.
 
-This has **not been reproduced**. Task 1 of the plan exists to prove or disprove it, and the plan
-must not claim it is real until that test fails for this reason.
+**Task 1 built the test and ran it; the clobber did not happen.**
+`HookSelfTest.static_hook_survives_visible_initialization()` hooks `LateVisible.describe()` — a
+static method of a class that is untouched (and therefore not yet even `kInitialized`) until the
+hook forces its `<clinit>` — confirms the hook fires on the very next call, then calls
+`Class.forName(name, true, loader)` 2048 times to trip `EnsureInitialized`'s per-thread counter and
+force the batched `MakeInitializedClassesVisiblyInitialized` flush described above, then checks
+again.
+
+Measured on the Pixel 9a / API 36 / arm64 device this plan uses throughout:
+
+- **`tools/run-selftest.sh`** (debug APK, compiled `verify`, never AOT — `aot_code == nullptr`, so
+  the target starts on the interpreter bridge rather than the resolution stub): logged
+  `PASS: static hook survived its class becoming visibly initialized`, and the run finished
+  `PASS: all checks passed` (24/24).
+- **`tools/run-aot-selftest.sh speed`** (release APK, compiled `-m speed` — the harsher case, where
+  §4.3's stub is actually reachable): logged the identical
+  `PASS: static hook survived its class becoming visibly initialized`, before the check chain
+  reached `DispatchCases.static_target_with_backup` and failed the overall run with a
+  `StackOverflowError` in `DispatchCases.static_replacement` — that is §4.3's already-documented
+  static-backup recursion, an unrelated defect that has nothing to do with `LateVisible.describe()`
+  or `FixupStaticTrampolines` clobbering anything.
+
+In neither build did the hook get lost. §5.1 is closed: `FixupStaticTrampolines` overwriting a hook
+was a real reading of the AOSP source but is not, on this measurement, an actual failure mode of
+this library. Task 2 is still worth doing, but only for §4.3's static-backup recursion — its
+justification is no longer "and this might also be a clobber," because this task found no clobber
+to fix.
 
 ### 5.2 `disable_aot()` misses already-linked classes
 
