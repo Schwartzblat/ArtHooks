@@ -45,12 +45,16 @@ jobs:
   self-test:
     name: self-test on API ${{ matrix.api-level }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Two builds (debug + release) and two on-device runs per matrix entry now happen in the one
+    # emulator session below -- raised from 45 to leave headroom for the second build/install/compile
+    # cycle that run-aot-selftest.sh adds on top of run-selftest.sh.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # 33 is minSdk; 36 is what the library has been verified against on hardware. Both run
-        # x86_64, so this is also the only coverage the x86_64 trampoline gets.
+        # x86_64, so this is also the only coverage the x86_64 trampoline gets -- for both the
+        # debug self-test and the AOT one below.
         api-level: [33, 36]
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +76,12 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Run the self-test
+      # Both scripts need a live emulator, and the action tears it down when this step ends, so
+      # both runs have to happen inside this one `script:` -- see CLAUDE.md's note that a debug
+      # build (run-selftest.sh) cannot see an inlining failure at all, which is exactly the class
+      # of bug run-aot-selftest.sh exists to catch. The action runs each line in order and stops at
+      # the first that fails, so a debug regression is reported before the AOT build even starts.
+      - name: Run the debug and AOT-compiled self-tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
@@ -81,7 +90,9 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: ./tools/run-selftest.sh
+          script: |
+            ./tools/run-selftest.sh
+            ./tools/run-aot-selftest.sh speed
 
   # Turns a tag into an actual release: builds the artifacts under the coordinate JitPack will
   # serve, attaches them to the GitHub release, and asks JitPack to build the tag so the Maven
