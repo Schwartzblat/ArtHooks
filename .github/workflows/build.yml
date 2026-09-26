@@ -25,7 +25,11 @@ jobs:
           distribution: temurin
           java-version: '26'
 
+      # Default packages are "tools platform-tools", and the "tools" package no longer exists in
+      # current cmdline-tools -- AGP fetches whatever platform/build-tools/NDK it needs itself.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -64,7 +68,11 @@ jobs:
           distribution: temurin
           java-version: '26'
 
+      # Default packages are "tools platform-tools", and the "tools" package no longer exists in
+      # current cmdline-tools -- AGP fetches whatever platform/build-tools/NDK it needs itself.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
@@ -113,7 +121,11 @@ jobs:
           distribution: temurin
           java-version: '26'
 
+      # Default packages are "tools platform-tools", and the "tools" package no longer exists in
+      # current cmdline-tools -- AGP fetches whatever platform/build-tools/NDK it needs itself.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - uses: gradle/actions/setup-gradle@v4
 
