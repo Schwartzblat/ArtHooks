@@ -223,9 +223,10 @@ class DispatchCases {
             return fail("expected the monitor NOT to be held inside the replacement");
         }
 
-        // Calling through does restore it: the backup jumps to the snapshot's pre-hook entry point,
-        // and the snapshot still carries ACC_SYNCHRONIZED, so ART's entry sequence locks the
-        // receiver exactly as it would have. Only the replacement's own code runs unprotected.
+        // Calling through does restore it: the backup's trampoline enters the target's real
+        // ArtMethod at its pre-hook entry point, and that ArtMethod still carries ACC_SYNCHRONIZED,
+        // so ART's entry sequence locks the receiver exactly as it would have. Only the
+        // replacement's own code runs unprotected.
         if (!original_body_held_lock) {
             return fail("expected the monitor to be held once the backup reached the original body");
         }

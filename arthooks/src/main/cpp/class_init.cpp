@@ -299,14 +299,20 @@ bool ensure_class_visibly_initialized(JNIEnv *env, jobject executable, ArtMethod
     }
 
     const char *class_name = env->GetStringUTFChars(name, nullptr);
-    const char *label = (class_name != nullptr) ? class_name : "<unknown>";
-
-    bool settled = g_stub_valid ? settle_off_the_stub(env, method, name, loader, label)
-                                : settle_by_watching_entry(env, method, name, loader, label);
-
-    if (class_name != nullptr) {
-        env->ReleaseStringUTFChars(name, class_name);
+    if (class_name == nullptr) {
+        // GetStringUTFChars only returns null after throwing OutOfMemoryError. Leaving that
+        // pending and nudging anyway would just throw again on the first Class.forName call, so
+        // give up now instead.
+        clear_exception(env, "could not read a static method's declaring class name");
+        env->DeleteLocalRef(name);
+        env->DeleteLocalRef(loader);
+        return false;
     }
+
+    bool settled = g_stub_valid ? settle_off_the_stub(env, method, name, loader, class_name)
+                                : settle_by_watching_entry(env, method, name, loader, class_name);
+
+    env->ReleaseStringUTFChars(name, class_name);
     env->DeleteLocalRef(name);
     env->DeleteLocalRef(loader);
     return settled;

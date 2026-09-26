@@ -437,10 +437,10 @@ runs both.
   replacement that does not carry the flag, so the lock is silently never taken and callers relying
   on the target for mutual exclusion race. The library logs a warning at hook time.
 
-  **Calling through the backup does restore it.** The backup jumps to the snapshot's pre-hook entry
-  point, and the snapshot still carries `ACC_SYNCHRONIZED`, so ART's entry sequence locks the
-  receiver exactly as it would have — verified on device. The unprotected window is only the
-  replacement's own code, outside the call-through.
+  **Calling through the backup does restore it.** The backup's trampoline enters the target's real
+  `ArtMethod` at its pre-hook entry point, and that `ArtMethod` still carries `ACC_SYNCHRONIZED`, so
+  ART's entry sequence locks the receiver exactly as it would have — verified on device. The
+  unprotected window is only the replacement's own code, outside the call-through.
 
   To close that window, lock explicitly. Marking the *replacement* `synchronized` is only correct for
   instance targets:
@@ -514,6 +514,7 @@ arthooks/                                      # the library, published as an AA
   src/main/cpp/class_init.{hpp,cpp}            #   forcing <clinit> before a hook is installed
   src/main/cpp/deoptimize.{hpp,cpp}            #   stopping ART running AOT code; AOT detection
   src/main/cpp/art_symbols.{hpp,cpp}           #   resolving libart's exported symbols by name
+  src/main/cpp/hook_registry.{hpp,cpp}         #   what each hook displaced; is_hooked(); unhook
   consumer-rules.pro                           #   R8 rules applied to consumers
 
 app/                                           # demo app and self-tests

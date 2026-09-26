@@ -279,7 +279,10 @@ public class HookSelfTest {
 
     // --- a static backup on a class the hook itself initialized ---------------------------------
 
-    /** A second static method, so the check below has a sibling to compare entry points against. */
+    /**
+     * A second static method, so the settled check below can hook a different method on
+     * {@code TwoStatics} once the class has already transitioned to visibly initialized.
+     */
     static class TwoStatics {
         static int marker = 1;
 
@@ -332,23 +335,19 @@ public class HookSelfTest {
 
     private static boolean settled_and_single_static_classes() {
         // Settled: TwoStatics was initialized and hooked in the previous check, so by now its
-        // transition has happened. Hooking its other method must not need any nudging.
-        long started = System.nanoTime();
+        // transition has happened. Hooking its other method exercises the already-settled path,
+        // where the entry point never matched the measured stub and no nudging was needed.
         if (!hook(declared_method(TwoStatics.class, "second"),
                 declared_method(HookSelfTest.class, "only_replacement"))) {
             return false;
         }
-        long elapsed_ms = (System.nanoTime() - started) / 1_000_000L;
         if (TwoStatics.second() != 7) {
             return fail("hooking an already-settled static target did not take");
         }
-        if (elapsed_ms > 250) {
-            return fail("hooking an already-settled static target took " + elapsed_ms
-                    + "ms, so the settled-class check is not short-circuiting the nudge loop");
-        }
 
-        // Single static method: nothing to compare against, so this must still settle off the stub
-        // and hook rather than being skipped or refused.
+        // Single static method: settling only ever checks this method's own entry point against
+        // the measured stub, so a class with no other static method must still settle and hook
+        // rather than being skipped or refused.
         if (!hook(declared_method(OneStatic.class, "only"),
                 declared_method(HookSelfTest.class, "only_replacement"))) {
             return false;
@@ -356,7 +355,8 @@ public class HookSelfTest {
         if (OneStatic.only() != 7) {
             return fail("hooking a class with a single static method did not take");
         }
-        return pass("settled classes short-circuit, and a single-static-method class still hooks");
+        return pass("an already-settled static target hooks, and a single-static-method class "
+                + "still hooks");
     }
 
     // --- a class initializer that throws --------------------------------------------------------

@@ -256,9 +256,9 @@ stops the JIT inlining a hooked target as well as compiling it.
   so nothing here can fix it. `hook_function` logs a warning. Marking the replacement `synchronized`
   is only right for instance targets — a `static synchronized` method locks its declaring class, so
   a `static synchronized` replacement locks the wrong object. Calling through the backup *does*
-  re-acquire it — the snapshot still carries `ACC_SYNCHRONIZED`, so ART's entry sequence locks the
-  receiver — so the unprotected window is only the replacement's own code. `DispatchCases` asserts
-  both halves.
+  re-acquire it — the backup's trampoline enters the target's real `ArtMethod`, which still carries
+  `ACC_SYNCHRONIZED`, so ART's entry sequence locks the receiver — so the unprotected window is only
+  the replacement's own code. `DispatchCases` asserts both halves.
 - **Trampoline codegen in `trampoline.cpp` is per-ABI and all four are built.** Only arm64 is exercised
   on a real device here; the arm/x86/x86_64 encodings were checked against the NDK assembler. If you
   touch them, verify the emitted bytes disassemble to the intended instructions rather than eyeballing
