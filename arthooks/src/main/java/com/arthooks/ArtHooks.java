@@ -23,11 +23,28 @@ import java.lang.reflect.Executable;
  * {@code void}. Nothing initialises the object unless the replacement calls the backup.
  */
 public class ArtHooks {
+    /**
+     * Set this to {@code true} <em>before</em> anything touches this class to keep ART's
+     * ahead-of-time compiled code, at the cost of hooks that dex2oat inlined away. See
+     * {@link #disable_aot()} for what that trade is.
+     *
+     * <pre>{@code
+     * System.setProperty("arthooks.keep_aot", "true");   // in attachBaseContext, before hooking
+     * }</pre>
+     */
+    public static final String KEEP_AOT_PROPERTY = "arthooks.keep_aot";
+
     private static final boolean AVAILABLE;
+    private static final boolean AOT_DISABLED;
 
     static {
         System.loadLibrary("arthooks");
         AVAILABLE = init(Build.VERSION.SDK_INT);
+        // Before anything else can load: this only protects classes ART has not linked yet, and it
+        // rewrites entry points, so a hook installed first would be overwritten. See disable_aot().
+        AOT_DISABLED = AVAILABLE
+                && !Boolean.parseBoolean(System.getProperty(KEEP_AOT_PROPERTY))
+                && disable_aot();
     }
 
     /**
@@ -37,6 +54,54 @@ public class ArtHooks {
     public static boolean is_available() {
         return AVAILABLE;
     }
+
+    /**
+     * Whether ART was told to stop running ahead-of-time compiled code.
+     *
+     * <p>This class's static initializer does that automatically, so the useful thing to know is
+     * when it did <em>not</em> happen — either {@link #KEEP_AOT_PROPERTY} asked for it to be
+     * skipped, or libart did not export what it takes. Hooks then work only for targets dex2oat did
+     * not inline into their callers, and a target that was inlined goes on running its original
+     * body with nothing reporting an error. See {@link #disable_aot()}.
+     */
+    public static boolean is_aot_disabled() {
+        return AOT_DISABLED;
+    }
+
+    /**
+     * Stops ART running ahead-of-time compiled code, so that hooks survive a {@code speed} or
+     * {@code speed-profile} build. Called automatically when this class loads; calling it again is
+     * a no-op.
+     *
+     * <p>Overwriting an entry point only redirects calls that <em>go through</em> the entry point.
+     * dex2oat inlines: with an AOT compiler filter it copies a small method's body into every
+     * caller it compiles, and such a caller never loads the callee's entry point at all. The hook
+     * installs, reports success and silently never fires — which is why an app can work when it is
+     * installed and start misbehaving hours later, once background dexopt has compiled it. Setting
+     * {@code kAccCompileDontBother} on the target stops the <em>JIT</em> inlining it, but cannot
+     * undo code dex2oat emitted before the process started.
+     *
+     * <p>What this does instead is make that code unreachable. ART consults
+     * {@code Instrumentation::CanUseAotCode()} before giving a freshly linked method its compiled
+     * body, and that says no for a Java-debuggable runtime, so marking the runtime Java-debuggable
+     * makes every class ART links afterwards run under nterp and dispatch through the
+     * {@code ArtMethod} again.
+     *
+     * <p><b>It only covers classes ART has not linked yet.</b> Touch this class as early as you
+     * can — {@code Application.attachBaseContext} is the usual place — so that it runs before the
+     * code you intend to hook, and that code's callers, are first loaded. A target still on AOT
+     * code when it is hooked is reported as a warning under the {@code ArtHooks} tag.
+     *
+     * <p>The cost is process-wide: the app runs nterp plus JIT instead of AOT code, and while
+     * debuggable the JIT compiles without inlining. Set {@link #KEEP_AOT_PROPERTY} to opt out of
+     * paying it. Nothing about the app's own debuggable flag changes — this is ART's internal
+     * state, not {@code ApplicationInfo.FLAG_DEBUGGABLE}, and it is not visible to
+     * {@code ApplicationInfo.flags} or to a debugger.
+     *
+     * <p>Returns false if libart does not export what this needs, in which case nothing was
+     * changed and the reason was logged.
+     */
+    public static native boolean disable_aot();
 
     /**
      * Finds a method or constructor by its JNI signature descriptor, for feeding to

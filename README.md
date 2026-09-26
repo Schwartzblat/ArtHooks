@@ -14,8 +14,10 @@ demo that also carries the test suite).
 
 Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 23 self-test checks
 covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival and
-concurrent installation. All 23 pass in a debug build; two fail in a release build, see
-[TODO](#todo).
+concurrent installation. All 23 pass in a debug build, and all 23 in a **release** build too, which
+is new — see [AOT](#aot-and-why-hooks-used-to-break-in-release-builds). The one remaining gap is a
+release build compiled `speed`: 19 of 23 pass, and the four that do not are all the same defect,
+backing up a `static` target, see [TODO](#todo).
 
 Four ABIs are built. Only arm64-v8a has been exercised on hardware; the armeabi-v7a, x86_64 and x86
 trampoline encodings were verified by disassembling the emitted bytes against the NDK assembler.
@@ -64,6 +66,75 @@ static native boolean gate_backup(Object thiz);
 
 A non-native backup is refused rather than installed, for a target that is not static. Static targets
 are exempt only because the rule there is not yet known; see [TODO](#todo).
+
+## AOT, and why hooks used to break in release builds
+
+Overwriting an entry point only redirects calls that *go through* the entry point. **dex2oat
+inlines**: under a `speed` or `speed-profile` filter it copies a small method's body into every
+caller it compiles, and a caller holding a copy never loads the callee's entry point at all. The
+hook installs, reports success, and silently never fires — which is why an app could work when it
+was installed and start misbehaving hours later, once background dexopt had compiled it.
+
+ArtHooks handles this for you. When the library loads it tells ART the runtime is Java-debuggable,
+which makes `Instrumentation::CanUseAotCode()` answer no — ART's own words are *"for simplicity, we
+never use AOT code for debuggable"* — so every class it links afterwards runs nterp and dispatches
+through the `ArtMethod` again. It also deoptimizes the boot image, so framework code that was
+already linked stops using its AOT bodies too. Nothing else changes: this is ART's internal state,
+not `ApplicationInfo.FLAG_DEBUGGABLE`, and it is invisible to the app and to a debugger.
+
+Three things to know:
+
+- **It only covers classes ART has not linked yet.** Touch `com.arthooks.ArtHooks` as early as you
+  can — `Application.attachBaseContext` is the usual place — so this runs before the code you intend
+  to hook, and that code's callers, are first loaded. Hooking a target that is still on AOT code
+  logs a warning under the `ArtHooks` tag naming exactly that.
+- **It costs performance, and the cost is all in cold code.** Measured on a Pixel 9a with
+  `tools/run-benchmark.sh` (minimum of 3 interleaved passes, so DVFS and thermal drift cannot pick a
+  winner):
+
+  | | first run of a code path | once the JIT has caught up |
+  |---|---|---|
+  | tight loop over small method calls | **203x** slower | 1.0x |
+  | recursive `fib`, float matmul | 21–33x slower | 0.9–1.0x |
+  | array/loop work (sieve, quicksort, bit twiddling) | 2.5–3.8x slower | 1.0–1.6x |
+  | `StringBuilder`, `HashMap` (boot classpath) | 3.4–6.2x slower | 1.0x |
+
+  Steady-state throughput is a wash — the JIT still inlines, so hot code ends up where it started.
+  What you pay for is every code path's *first* execution, which lands in nterp. `vmSafeMode` alone
+  is far gentler on that first run (9.7x rather than 203x on the same loop) because it leaves the
+  runtime non-debuggable; `Jit::TryPatternMatch`, ART's fast path for trivial getters and setters,
+  is explicitly gated on `!Runtime::Current()->IsJavaDebuggable()`, and that is one of the things
+  `disable_aot()` gives up.
+
+  Cold start on the demo app: 89 ms baseline, 95 ms with `vmSafeMode`, 124 ms with `disable_aot()`.
+
+  To keep AOT code and take the inlining risk, set the property *before* anything touches the class:
+
+  ```java
+  System.setProperty(ArtHooks.KEEP_AOT_PROPERTY, "true");   // "arthooks.keep_aot"
+  ```
+
+  `ArtHooks.is_aot_disabled()` reports whether it actually happened.
+- **It needs libart to export three symbols** (`art::Runtime::instance_`,
+  `SetRuntimeDebugState`, `DeoptimizeBootImage`). They are resolved by name out of the already-mapped
+  libart.so; a platform that renames or hides one makes `disable_aot()` return false and change
+  nothing, rather than guessing at a struct offset.
+
+If you control the manifest of the app being hooked — repackaging an APK, say — `android:vmSafeMode`
+is a belt-and-braces alternative that needs no ART internals at all. It makes the package manager
+refuse to AOT-compile the app in the first place, so there is never any inlined code to work around,
+even under a forced `cmd package compile -m speed -f`:
+
+```xml
+<application android:vmSafeMode="true" ... >
+```
+
+It does not help with the boot classpath, and it costs the same AOT performance app-wide, so it is a
+substitute for the runtime fix rather than an addition to it.
+
+The JIT is a separate, already-handled case: AOSP's `HInliner` refuses to inline a method that is not
+compilable, and ArtHooks sets `kAccCompileDontBother` on every target, so the JIT will not inline a
+hooked method into a hot caller either.
 
 ## Usage
 
@@ -124,6 +195,9 @@ All of `com.arthooks.ArtHooks`:
 | `find_function(Class<?> owner, String name, String signature)` | `Executable` or `null` | Resolves a method or constructor by JNI descriptor. Searches superclasses, like JNI's own lookup. |
 | `hook_function(Executable original, Executable replacement)` | `boolean` | Redirects `original` to `replacement`. |
 | `hook_function(Executable original, Executable replacement, Executable backup)` | `boolean` | As above, and wires `backup` to the original body. |
+| `is_aot_disabled()` | `boolean` | Whether ART was told to stop running AOT code. See [AOT](#aot-and-why-hooks-used-to-break-in-release-builds). |
+| `disable_aot()` | `boolean` | Does that. Called automatically when the class loads; calling it again is a no-op. |
+| `KEEP_AOT_PROPERTY` | `String` | `"arthooks.keep_aot"` — set it to `true` before touching this class to opt out. |
 
 Failures return `false`/`null` and log the reason under the `ArtHooks` tag rather than throwing.
 
@@ -135,11 +209,16 @@ silently drop the hook. Expect `<clinit>` to run earlier than it normally would.
 
 1. `ArtHooks`'s static initializer loads `libarthooks.so` and measures `sizeof(art::ArtMethod)` on
    the running platform, deriving the offset of the entry point from it.
-2. Hooking overwrites **only** `entry_point_from_quick_compiled_code_` on the target, with a
+2. It then tells ART to stop using ahead-of-time compiled code, so that calls actually reach the
+   entry point instead of running a copy dex2oat inlined into the caller. This has to happen before
+   any hook is installed, since it rewrites entry points — see
+   [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
+3. Hooking overwrites **only** `entry_point_from_quick_compiled_code_` on the target, with a
    generated trampoline — three instructions that load the replacement's `ArtMethod*` into the
    register ART's quick calling convention reserves for it, then tail-jump through that method's
    entry point.
-3. The backup is a trampoline for a snapshot of the target's `ArtMethod` taken before it was hooked.
+4. The backup is a trampoline that names the target's real `ArtMethod` but jumps to the entry point
+   captured from it before the hook went in.
 
 The trampoline is the part that isn't obvious. Compiled code, nterp and the interpreter bridge all
 read the method they are executing — its declaring class, dex cache, code item — out of that
@@ -316,6 +395,11 @@ adb logcat -s HookSelfTest  # 23 checks, then "PASS: all checks passed"
 adb logcat -s ArtHooks      # native log tag
 ```
 
+`tools/run-aot-selftest.sh` runs the same suite against a non-debuggable build compiled `speed` or
+`verify`, which is the only configuration that can catch a hook being inlined away — a debuggable
+APK is never inlined, so the debug self-test is structurally blind to it.
+`tools/run-benchmark.sh` measures what dropping AOT code costs, across all four configurations.
+
 `tools/check-jni-symbols.sh` verifies that every native method declared in `ArtHooks.java` is
 actually exported by `libarthooks.so`, for every ABI. JNI binds by mangled symbol name and a rename
 fails silently until the method is called, so this is worth running after any signature change. CI
@@ -328,9 +412,8 @@ runs both.
   compile that finishes after the hook is installed overwrites it — silently, and permanently, so the
   method simply runs its original body again. ArtHooks sets `kAccCompileDontBother` on the target
   before writing the entry point, which stops ART compiling it and closes the common case, but a
-  compilation already in flight can still land. Separately, callers that are already compiled may
-  call the target directly or have inlined it, bypassing the entry point altogether. Hook during
-  startup, before the methods you are hooking have been called thousands of times.
+  compilation already in flight can still land. Hook during startup, before the methods you are
+  hooking have been called thousands of times.
 - **No unhook.** Trampolines and snapshots live for the lifetime of the process. Hooking the same
   method twice chains, second hook outermost.
 - **A `synchronized` target's monitor is not taken.** A `synchronized` *method* has no
@@ -354,14 +437,15 @@ runs both.
 
   A `static synchronized` method locks its *declaring class*, so a `static synchronized` replacement
   would lock the replacement's own class — the wrong object, and no error.
-- **Boot-classpath targets work from app call sites, but not necessarily from inside the
-  framework.** AOT code can call a known-address callee directly instead of loading its entry point,
-  and nothing here detects that.
-- **A target that an AOT-compiled caller has inlined cannot be hooked at all.** Same cause as the
-  backup rule above, on the other side of the call: there is no call left to redirect. Measured on
-  API 36 — a tight loop over a one-line target, compiled with `compile -m speed`, keeps running the
-  original body with the hook installed and reporting success. Nothing detects it, and no
-  entry-point hooking library can fix it.
+- **A target whose class ART linked before ArtHooks loaded may still have been inlined away.**
+  Dropping AOT code only governs classes linked afterwards, so a class that was already in use keeps
+  the bodies dex2oat gave it, and a caller that inlined the target has no call left to redirect.
+  This is now *detected* — hooking a target that is still on AOT code logs a warning naming it — but
+  it cannot be repaired after the fact. Load `ArtHooks` as early as you can. See
+  [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
+- **Boot-classpath targets work from app call sites, and from inside the framework only once the
+  boot image has been deoptimized** — which `disable_aot()` does, but again only for frames entered
+  afterwards.
 - **`find_function` searches superclasses**, unlike `getDeclaredMethod`. An inherited method
   resolves to the superclass's `ArtMethod`, so hooking it affects every subclass.
 - **The `ArtMethod` mirror in `art_method.hpp` is hand-maintained.** Nothing indexes it — the layout
@@ -374,22 +458,43 @@ runs both.
 
 - **Backing up a `static` target recurses.** Calling the backup lands back in the replacement
   instead of the original body, until the stack overflows. Reproduced by the two `StaticTarget`
-  cases in `ArityCases`; `DispatchCases.static_target_with_backup` fails the same way.
+  cases in `ArityCases`, by `DispatchCases.static_target_with_backup` and by
+  `RuntimeCases.chained_hooks` — the four release-build failures.
 
-  What it is not: argument count (7 and 8 both recurse), the `native` backup rule above (recurses
-  with a body too), the target sharing a class with the replacement (recurses either way), an
-  unsettled entry point (calling the target once before hooking does not help), or the compiler
-  filter (`-m verify` and `-m speed` both recurse). The captured entry points were classified
-  against `/proc/<pid>/maps` and land in the app's own compiled code, not in a `libart.so` stub, so
-  the obvious "a stub re-dispatches through the hooked method" story does not hold either.
+  **The cause is known**, from AOSP rather than from guesswork. `Instrumentation::GetInitialEntrypoint`
+  gives a method the quick *resolution stub* when `ArtMethod::NeedsClinitCheckBeforeCall()` holds —
+  which is exactly `IsStatic() && !IsConstructor()` — and leaves it there until the declaring class
+  becomes **visibly** initialized. On arm64 that transition is batched:
+  `ClassLinker::MarkClassInitialized` only sets `kInitialized` and queues the class for a
+  `VisiblyInitializedCallback`, and `ClassLinker::FixupStaticTrampolines` — the thing that installs
+  the real entry point — does not run until that callback fires. So `install_backup` captures the
+  resolution stub, bakes it into the backup's trampoline, and calling the backup re-enters the stub,
+  which re-reads `entry_point_from_quick_compiled_code_` — by then the hook — and lands in the
+  replacement. Round and round.
 
-  The one thing that correlates is **debug build versus release build**: every shape passes in
-  debug. A debuggable app is neither AOT-compiled nor JIT-compiled, so the working hypothesis is
-  that this is the JIT rather than the dex output — unverified. Next step is disassembling the
-  captured entry address out of the oat file to see what code actually sits there.
+  The trigger is precise. `GetInitialEntrypoint` reads:
 
-  Until then `hook_function` logs a warning and installs anyway, rather than refusing a shape that
-  does work in some configurations. Instance-method and constructor targets are unaffected.
+  ```cpp
+  return (aot_code != nullptr || IsNative(flags)) ? GetQuickResolutionStub()
+                                                  : GetQuickToInterpreterBridge();
+  ```
+
+  — note `aot_code != nullptr`, *not* `CanUseAotCode()`, so `disable_aot()` has no effect on this
+  branch. What decides it is whether dex2oat compiled the method at all. That accounts for every
+  observation: static-only (instance methods and constructors never reach that branch), independent
+  of arity and of `native`, reproducing under `compile -m speed` and not under `-m verify` — and
+  therefore not in a debug build, since a debuggable APK is compiled `verify`. The earlier note here
+  blamed debuggability itself; that was the correlation, not the cause. `kRuntimeISA == kX86` skips
+  the batching entirely — *"thanks to the x86 memory model"* — so this should not reproduce on x86.
+
+  Workaround until it is fixed: don't pass a backup for a `static` target in an AOT-compiled build,
+  or keep the app off AOT (`android:vmSafeMode`, above), which removes the trigger.
+
+  Not fixed, because the repair needs `ClassLinker::MakeInitializedClassesVisiblyInitialized`, and
+  reaching it means finding `Runtime::GetClassLinker()`'s result — an inline accessor over a struct
+  offset that cannot be measured, which is the one thing this library refuses to guess at.
+  `hook_function` still logs a warning and installs anyway. Instance-method and constructor targets
+  are unaffected.
 
 ## Layout
 
@@ -400,6 +505,8 @@ arthooks/                                      # the library, published as an AA
   src/main/cpp/trampoline.{hpp,cpp}            #   per-ABI thunk codegen
   src/main/cpp/art_method.{hpp,cpp}            #   ArtMethod mirror, layout probing, accessors
   src/main/cpp/class_init.{hpp,cpp}            #   forcing <clinit> before a hook is installed
+  src/main/cpp/deoptimize.{hpp,cpp}            #   stopping ART running AOT code; AOT detection
+  src/main/cpp/art_symbols.{hpp,cpp}           #   resolving libart's exported symbols by name
   consumer-rules.pro                           #   R8 rules applied to consumers
 
 app/                                           # demo app and self-tests

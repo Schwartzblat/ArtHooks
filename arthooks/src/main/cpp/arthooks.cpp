@@ -2,6 +2,7 @@
 
 #include "art_method.hpp"
 #include "class_init.hpp"
+#include "deoptimize.hpp"
 #include "log.hpp"
 #include "trampoline.hpp"
 
@@ -88,11 +89,29 @@ bool modifiers_of(JNIEnv *env, jobject executable, jint *modifiers_out) {
  * fails under `compile -m speed`, which is why an app can work when it is installed and start
  * misbehaving hours later once background dexopt has compiled it.
  *
- * A static target is left alone, because the same reasoning does not hold there and the shape that
- * does work is not established. Backing one up recurses into the replacement until the stack runs
- * out in a release build, whether or not the backup is native, while every shape passes in a debug
- * build -- so the rule to enforce is not known yet, and guessing one would refuse a hook that
- * works. Warn instead. Separate defect; see ArityCases in the self-test.
+ * A static target is a separate, unfixed defect, and the backup's shape has nothing to do with it:
+ * backing one up recurses into the replacement until the stack runs out, with or without `native`.
+ * The cause is ART's. Instrumentation::GetInitialEntrypoint() reads, for a method where
+ * NeedsClinitCheckBeforeCall() holds -- which is exactly IsStatic() && !IsConstructor():
+ *
+ *     return (aot_code != nullptr || IsNative(flags)) ? GetQuickResolutionStub()
+ *                                                     : GetQuickToInterpreterBridge();
+ *
+ * so a static method whose oat file carries code for it starts on the *resolution stub*, and keeps
+ * it until ClassLinker::FixupStaticTrampolines() runs -- which waits for the declaring class to
+ * become *visibly* initialized, a transition arm64 batches behind a VisiblyInitializedCallback.
+ * install_backup() captures that stub, and calling the backup re-enters it, where it re-reads
+ * entry_point_from_quick_compiled_code_ -- by then the hook -- and lands in the replacement.
+ *
+ * Note the condition is `aot_code != nullptr`, not CanUseAotCode(): disable_aot_code() does not
+ * affect this branch. What decides it is whether dex2oat compiled the method at all, which is why
+ * this reproduces under `compile -m speed` and not under `-m verify`, and why it looked like a
+ * debug-versus-release difference -- a debuggable APK is compiled `verify`.
+ *
+ * Repairing it needs ClassLinker::MakeInitializedClassesVisiblyInitialized(), and reaching that
+ * means finding Runtime::GetClassLinker()'s result, an inline accessor over a struct offset this
+ * library has no way to measure. So: warn, install anyway, and let the caller decide. See
+ * ArityCases in the self-test.
  */
 bool reject_mismatched_backup(JNIEnv *env, jobject original, jobject backup) {
     jint target_modifiers = 0;
@@ -116,9 +135,12 @@ bool reject_mismatched_backup(JNIEnv *env, jobject original, jobject backup) {
         return true;
     }
     if (target_is_static) {
-        LOGW("backing up a static target is unreliable: in a release build the backup recurses into "
-             "the replacement until the stack overflows, with or without `native`. Installing it "
-             "anyway, because it does work in a debug build and the rule is not pinned down yet.");
+        LOGW("backing up a static target is unreliable, whether or not the backup is native: while "
+             "the target's class is not yet *visibly* initialized ART leaves an AOT-compiled static "
+             "method on the resolution stub, and a backup built on that stub re-dispatches through "
+             "the hook and recurses until the stack overflows. It is safe when dex2oat did not "
+             "compile the target (a `verify` build). Installing it anyway -- nothing here can force "
+             "that class transition.");
     }
     return false;
 }
@@ -153,6 +175,33 @@ bool install_backup(ArtMethod *backup, ArtMethod *target) {
     set_entry_point(backup, trampoline);
     LOGD("backup ArtMethod %p now runs the body of %p (entry %p)", backup, target, original_entry);
     return true;
+}
+
+/**
+ * Warns when the target is running ahead-of-time compiled code.
+ *
+ * That means the class kept the body dex2oat produced for it -- and dex2oat inlines. Any caller it
+ * compiled may hold a copy of this method rather than a call through the entry point, and no call
+ * site like that can be redirected by anything written here. The hook still installs and still
+ * fires for every caller that does load the entry point, so this is a warning rather than a
+ * refusal, but it is the one case where a hook reports success and does nothing.
+ *
+ * Two ways to be here: disable_aot_code() never ran (libart did not export what it needs, or
+ * ArtHooks.KEEP_AOT_PROPERTY asked it not to), or it ran too late -- ART had already linked this
+ * class, and it only governs classes linked afterwards.
+ */
+void warn_if_aot_compiled(ArtMethod *target) {
+    if (!is_aot_code(get_entry_point(target))) {
+        return;
+    }
+    if (aot_code_disabled()) {
+        LOGW("the target is on AOT code because ART linked its class before ArtHooks loaded -- a "
+             "caller dex2oat inlined it into will keep running the original body. Touch "
+             "com.arthooks.ArtHooks earlier (Application.attachBaseContext is the usual place).");
+    } else {
+        LOGW("the target is on AOT code and ArtHooks did not stop ART using it -- a caller dex2oat "
+             "inlined it into will keep running the original body. See ArtHooks.disable_aot().");
+    }
 }
 
 /**
@@ -214,10 +263,16 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
         return false;
     }
 
+    warn_if_aot_compiled(target);
+
     // Before anything is written: if the target is currently hot, the JIT may already have queued it
     // for compilation, and a compile that lands after the trampoline is installed would overwrite the
     // entry point and silently drop the hook. Telling ART not to compile it closes that off. Ordering
     // matters -- doing this after the entry point write would leave the window open in between.
+    //
+    // It does one more thing, which matters more than the race: AOSP's HInliner refuses to inline a
+    // method that is not compilable, so this is also what stops the JIT inlining the target's body
+    // into a hot caller later and quietly stepping around the hook.
     if (!discourage_compilation(target) && can_discourage_compilation()) {
         LOGW("could not stop ART compiling %p; hooking it while it is hot may lose the hook", target);
     }
@@ -248,6 +303,12 @@ Java_com_arthooks_ArtHooks_init(JNIEnv *env, jclass clazz, jint sdk_version) {
         LOGI("ArtHooks initialised on API %d", sdk_version);
     }
     return g_initialized ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arthooks_ArtHooks_disable_1aot(JNIEnv *env, jclass clazz) {
+    return disable_aot_code() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C"

@@ -5,7 +5,8 @@ project("arthooks")
 
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        arthooks.cpp art_method.cpp class_init.cpp trampoline.cpp)
+        arthooks.cpp art_method.cpp art_symbols.cpp class_init.cpp deoptimize.cpp
+        trampoline.cpp)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         android
