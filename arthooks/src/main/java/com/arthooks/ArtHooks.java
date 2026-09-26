@@ -157,6 +157,16 @@ public class ArtHooks {
     public static native boolean hook_function(Executable original, Executable replacement,
                                                Executable backup);
 
+    /**
+     * Whether {@code method}'s entry point still holds the trampoline ArtHooks put there.
+     *
+     * <p>False for a method that was never hooked — and, more usefully, false for one whose hook ART
+     * has since overwritten. ART rewrites entry points for reasons of its own (class
+     * initialization, JIT compilation, deoptimization), and when that lands on a hooked method the
+     * hook is gone with nothing reporting it. This is how to find out.
+     */
+    public static native boolean is_hooked(Executable method);
+
     private static native boolean init(int sdk_version);
 
     // Used at startup to locate art::ArtMethod::access_flags_, by finding the one offset whose word

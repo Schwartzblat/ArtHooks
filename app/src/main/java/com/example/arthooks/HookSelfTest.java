@@ -4,6 +4,8 @@ import android.util.Log;
 
 import com.arthooks.ArtHooks;
 
+import java.lang.reflect.Method;
+
 import static com.example.arthooks.Checks.TAG;
 import static com.example.arthooks.Checks.declared_method;
 import static com.example.arthooks.Checks.fail;
@@ -46,6 +48,7 @@ public class HookSelfTest {
                     && static_backup_on_a_fresh_class()
                     && settled_and_single_static_classes()
                     && throwing_class_initializer_fails_the_hook()
+                    && a_successful_hook_is_actually_installed()
                     && SignatureCases.check()
                     && DispatchCases.check()
                     && RuntimeCases.check()
@@ -382,5 +385,37 @@ public class HookSelfTest {
             return fail("hooking a class whose <clinit> throws reported success");
         }
         return pass("a throwing class initializer fails the hook instead of looping");
+    }
+
+    // --- a hook that reports success is verifiably installed ------------------------------------
+
+    static class Verified {
+        static int marker = 1;
+
+        int value() {
+            return 1;
+        }
+    }
+
+    public static int verified_replacement(Object thiz) {
+        return 5;
+    }
+
+    private static boolean a_successful_hook_is_actually_installed() {
+        Method target = declared_method(Verified.class, "value");
+        if (ArtHooks.is_hooked(target)) {
+            return fail("is_hooked() was true before anything was hooked");
+        }
+        if (!hook(target, declared_method(HookSelfTest.class, "verified_replacement",
+                with_thiz()))) {
+            return false;
+        }
+        if (!ArtHooks.is_hooked(target)) {
+            return fail("hook_function() returned true but is_hooked() says otherwise");
+        }
+        if (new Verified().value() != 5) {
+            return fail("is_hooked() agreed but the hook did not fire");
+        }
+        return pass("a hook that reports success is verifiably installed");
     }
 }

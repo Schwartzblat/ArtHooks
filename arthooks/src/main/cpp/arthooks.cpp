@@ -3,6 +3,7 @@
 #include "art_method.hpp"
 #include "class_init.hpp"
 #include "deoptimize.hpp"
+#include "hook_registry.hpp"
 #include "log.hpp"
 #include "trampoline.hpp"
 
@@ -146,7 +147,9 @@ bool install_backup(ArtMethod *backup, ArtMethod *target) {
         return false;
     }
 
-    set_entry_point(backup, trampoline);
+    if (!set_entry_point(backup, trampoline)) {
+        return false;
+    }
     LOGD("backup ArtMethod %p now runs the body of %p (entry %p)", backup, target, original_entry);
     return true;
 }
@@ -275,7 +278,11 @@ bool hook_function(JNIEnv *env, jobject original, jobject replacement, jobject b
     if (trampoline == nullptr) {
         return false;
     }
-    set_entry_point(target, trampoline);
+    void *previous_entry = get_entry_point(target);
+    if (!set_entry_point(target, trampoline)) {
+        return false;
+    }
+    remember_hook(target, previous_entry, trampoline);
 
     LOGI("hooked ArtMethod %p with %p", target, hook);
     return true;
@@ -337,6 +344,16 @@ JNIEXPORT jboolean JNICALL
 Java_com_arthooks_ArtHooks_hook_1function__Ljava_lang_reflect_Executable_2Ljava_lang_reflect_Executable_2Ljava_lang_reflect_Executable_2(
         JNIEnv *env, jclass clazz, jobject original, jobject replacement, jobject backup) {
     return hook_function(env, original, replacement, backup) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arthooks_ArtHooks_is_1hooked(JNIEnv *env, jclass clazz, jobject method) {
+    if (!g_initialized || method == nullptr) {
+        return JNI_FALSE;
+    }
+    ArtMethod *art_method = get_art_method(env, method);
+    return (art_method != nullptr && hook_is_installed(art_method)) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Exists only so tools/check-jni-symbols.sh finds a symbol for the probe method declared in
