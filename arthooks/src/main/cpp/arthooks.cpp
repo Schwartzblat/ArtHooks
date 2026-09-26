@@ -346,6 +346,53 @@ Java_com_arthooks_ArtHooks_hook_1function__Ljava_lang_reflect_Executable_2Ljava_
     return hook_function(env, original, replacement, backup) ? JNI_TRUE : JNI_FALSE;
 }
 
+/**
+ * Puts back the entry point a hook displaced.
+ *
+ * Only the entry point is restored, because only the entry point was changed -- with one exception
+ * that is deliberately not undone: kAccCompileDontBother stays set. Clearing it would let ART
+ * compile a method that other hooks in a chain may still be redirecting, and the flag costs nothing
+ * but some JIT throughput on a method that was hot enough to be worth hooking.
+ *
+ * The trampoline is not freed. Another thread can be inside it right now, there is no way to know
+ * when it is not, and trampolines are bump-allocated out of a shared page that nothing can return
+ * memory to anyway.
+ */
+bool unhook_function(JNIEnv *env, jobject method) {
+    if (!g_initialized) {
+        LOGE("ArtHooks failed to initialise; refusing to unhook");
+        return false;
+    }
+    if (method == nullptr) {
+        LOGE("unhook_function() needs a non-null method");
+        return false;
+    }
+
+    ArtMethod *target = get_art_method(env, method);
+    if (target == nullptr) {
+        LOGE("could not resolve an ArtMethod to unhook");
+        return false;
+    }
+
+    void *previous_entry = nullptr;
+    if (!forget_hook(target, &previous_entry)) {
+        LOGW("ArtMethod %p is not hooked", target);
+        return false;
+    }
+    if (!set_entry_point(target, previous_entry)) {
+        return false;
+    }
+
+    LOGI("unhooked ArtMethod %p, entry point restored to %p", target, previous_entry);
+    return true;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_arthooks_ArtHooks_unhook_1function(JNIEnv *env, jclass clazz, jobject method) {
+    return unhook_function(env, method) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_com_arthooks_ArtHooks_is_1hooked(JNIEnv *env, jclass clazz, jobject method) {

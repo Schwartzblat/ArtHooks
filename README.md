@@ -12,12 +12,12 @@ demo that also carries the test suite).
 
 ## Status
 
-Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 27 self-test checks
+Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 30 self-test checks
 covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival,
-concurrent installation and static targets whose class is not yet visibly initialized. All 27 pass
-in a debug build, all 27 in a **release** build compiled `verify`, and all 27 in a release build
-compiled `speed` — the harshest case, where dex2oat has compiled everything. See
-[AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
+concurrent installation, static targets whose class is not yet visibly initialized, and unhooking a
+single or a chained hook. All 30 pass in a debug build, all 30 in a **release** build compiled
+`verify`, and all 30 in a release build compiled `speed` — the harshest case, where dex2oat has
+compiled everything. See [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
 
 Four ABIs are built. Only arm64-v8a has been exercised on hardware; the armeabi-v7a, x86_64 and x86
 trampoline encodings were verified by disassembling the emitted bytes against the NDK assembler.
@@ -197,6 +197,8 @@ All of `com.arthooks.ArtHooks`:
 | `find_function(Class<?> owner, String name, String signature)` | `Executable` or `null` | Resolves a method or constructor by JNI descriptor. Searches superclasses, like JNI's own lookup. |
 | `hook_function(Executable original, Executable replacement)` | `boolean` | Redirects `original` to `replacement`. |
 | `hook_function(Executable original, Executable replacement, Executable backup)` | `boolean` | As above, and wires `backup` to the original body. |
+| `is_hooked(Executable method)` | `boolean` | Whether `method`'s entry point still holds the trampoline ArtHooks installed — false if it was never hooked, or if ART has since overwritten it. |
+| `unhook_function(Executable method)` | `boolean` | Removes the most recent hook on `method`, restoring the entry point it displaced. One layer at a time, and does not synchronize with calls in flight. |
 | `is_aot_disabled()` | `boolean` | Whether ART was told to stop running AOT code. See [AOT](#aot-and-why-hooks-used-to-break-in-release-builds). |
 | `disable_aot()` | `boolean` | Does that. Called automatically when the class loads; calling it again is a no-op. |
 | `KEEP_AOT_PROPERTY` | `String` | `"arthooks.keep_aot"` — set it to `true` before touching this class to opt out. |
@@ -393,7 +395,7 @@ suite takes about six seconds to finish, most of it deliberately waiting for the
 ```bash
 ./tools/run-selftest.sh     # installs, runs, and exits non-zero unless every check passed
 
-adb logcat -s HookSelfTest  # 23 checks, then "PASS: all checks passed"
+adb logcat -s HookSelfTest  # 30 checks, then "PASS: all checks passed"
 adb logcat -s ArtHooks      # native log tag
 ```
 
@@ -416,8 +418,14 @@ runs both.
   before writing the entry point, which stops ART compiling it and closes the common case, but a
   compilation already in flight can still land. Hook during startup, before the methods you are
   hooking have been called thousands of times.
-- **No unhook.** Trampolines and snapshots live for the lifetime of the process. Hooking the same
-  method twice chains, second hook outermost.
+- **Unhooking exists, but nothing is ever freed.** `unhook_function()` restores the entry point a
+  hook displaced, one layer at a time — hooking the same method twice chains, second hook outermost,
+  and each unhook call undoes exactly the outermost layer still standing. The trampoline itself is
+  never freed: another thread can be inside it right now, there is no way to know when none is, and
+  trampolines are bump-allocated out of a shared page nothing can return memory to anyway.
+  **It does not synchronize with calls in flight** — a thread already inside the replacement stays
+  there, and one that already loaded the (now-stale) entry point still jumps to the trampoline. Unhook
+  only when you know the method is quiet.
 - **A `synchronized` target's monitor is not taken.** A `synchronized` *method* has no
   `monitor-enter` in its body — the lock is acquired by the callee's own entry sequence, driven by
   `ACC_SYNCHRONIZED` on the method being entered. The hook redirects before any of that runs, into a

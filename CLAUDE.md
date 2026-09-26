@@ -13,7 +13,7 @@ instrumentation-test harness, so "run the tests" means launch the app and read `
 by the JIT, so `tools/run-selftest.sh` is structurally blind to the whole AOT failure class.
 `tools/run-aot-selftest.sh` is the one that exercises it, and it takes the compiler filter as an
 argument so `speed` and `verify` can be compared directly — that difference is the signal. Currently:
-all 27 pass under `run-selftest.sh`, all 27 under `run-aot-selftest.sh verify`, and all 27 under
+all 30 pass under `run-selftest.sh`, all 30 under `run-aot-selftest.sh verify`, and all 30 under
 `run-aot-selftest.sh speed` — the static-target-backup defect that used to fail four `speed` cases is
 fixed by settling a static target off the resolution stub (see the last bullet in "Things that will
 bite you").
@@ -28,6 +28,7 @@ arthooks/src/main/cpp/art_method.{hpp,cpp}         # ArtMethod struct mirror, la
 arthooks/src/main/cpp/class_init.{hpp,cpp}         # forcing <clinit> before a hook is installed
 arthooks/src/main/cpp/deoptimize.{hpp,cpp}         # stopping ART running AOT code; AOT detection
 arthooks/src/main/cpp/art_symbols.{hpp,cpp}        # resolving libart's exported symbols by name
+arthooks/src/main/cpp/hook_registry.{hpp,cpp}      # what each hook displaced; is_hooked(); unhook
 arthooks/src/main/cpp/log.hpp                      # LOGD/LOGI/... macros
 arthooks/consumer-rules.pro                        # R8 rules shipped to consumers
 app/src/main/java/com/example/arthooks/            # demo app + tests, see below
@@ -55,6 +56,7 @@ DispatchCases               # constructor, static+backup, private/final, interfa
 RuntimeCases                # boot-classpath target, chained hooks, install under concurrent calls
 LookupCases                 # find_function: each kind, overload picking, misses, find-then-hook
 ArityCases                  # backups whose arguments spill past the ABI's registers
+LifecycleCases              # unhooking: restores the original, unwinds a chained hook one layer
 Benchmark                   # throughput, for costing disable_aot(); only runs for --ez benchmark
 ```
 
@@ -310,10 +312,21 @@ stops the JIT inlining a hooked target as well as compiling it.
   get that fixup, and nterp reads `declaring_class_` on every call. `backup_survives_a_relocating_gc`
   pins this down. (An earlier version of this file, and of the code, used a malloc'd snapshot; it
   does not any more.)
-- **There is no unhook.** Trampolines are allocated for the lifetime of the process. Hooking the same
-  method twice chains, second hook outermost: the second backup captures an already-hooked target's
-  entry point, so calling through it runs the first hook, which calls through to the original.
-  `RuntimeCases.chained_hooks` pins that ordering down.
+- **Unhooking exists, but trampolines are never freed.** `unhook_function()` pairs `hook_registry.cpp`'s
+  `forget_hook()`, which hands back the entry point a hook displaced, with `art_method.cpp`'s
+  `set_entry_point()`, which writes it back. It restores that entry point one layer at a
+  time: hooking the same method twice chains, second hook outermost -- the second backup captures an
+  already-hooked target's entry point, so calling through it runs the first hook, which calls through
+  to the original (`RuntimeCases.chained_hooks` pins that ordering down) -- and the first
+  `unhook_function()` call removes only the outer layer, leaving the inner hook in place and working;
+  the second restores the original. `LifecycleCases` pins both cases down, plus idempotence: calling
+  `unhook_function()` on a method that is not hooked returns false rather than doing anything.
+  The trampoline itself is still never freed -- another thread can be inside it right now, there is no
+  way to know when none is, and trampolines are bump-allocated out of a shared page nothing can return
+  memory to anyway. Nor is `kAccCompileDontBother` cleared, because a chain's remaining hooks may still
+  depend on ART not compiling the method. **Unhooking does not synchronize with calls in flight** -- a
+  thread already inside the replacement stays there, and one that has already loaded the entry point
+  still jumps to the trampoline.
 - **Boot-classpath targets work from app call sites, and from inside the framework only after the
   boot image is deoptimized.** `RuntimeCases` hooks `StringTokenizer.countTokens()` and the app's
   calls land in the replacement. Framework-internal callers used to keep running the original,

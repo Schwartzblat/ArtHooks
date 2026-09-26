@@ -167,6 +167,23 @@ public class ArtHooks {
      */
     public static native boolean is_hooked(Executable method);
 
+    /**
+     * Removes the most recent hook on {@code method}, restoring the entry point it displaced.
+     *
+     * <p>A method hooked twice has two hooks, and this removes one layer: the first call leaves the
+     * earlier hook in place and working, the second restores the original. Returns false if the
+     * method is not hooked.
+     *
+     * <p>The trampoline is not freed — another thread may be executing it, and there is no way to
+     * know when none is. Nor is {@code kAccCompileDontBother} cleared, because other hooks in a
+     * chain may still depend on ART not compiling the method.
+     *
+     * <p><b>This does not synchronize with calls in flight.</b> A thread already inside the
+     * replacement stays there, and one that has already loaded the entry point still jumps to the
+     * trampoline. Unhook when you know the method is quiet.
+     */
+    public static native boolean unhook_function(Executable method);
+
     private static native boolean init(int sdk_version);
 
     // Used at startup to locate art::ArtMethod::access_flags_, by finding the one offset whose word

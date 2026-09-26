@@ -53,7 +53,8 @@ public class HookSelfTest {
                     && DispatchCases.check()
                     && RuntimeCases.check()
                     && LookupCases.check()
-                    && ArityCases.check()) {
+                    && ArityCases.check()
+                    && LifecycleCases.check()) {
                 Log.i(TAG, "PASS: all checks passed");
             }
         } catch (Throwable t) {
