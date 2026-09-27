@@ -70,7 +70,9 @@ class DispatchCases {
         return static_backup(value) * 10;
     }
 
-    // A static target's backup keeps a body: a native one recurses back into the replacement.
+    // A static target's backup keeps a Java body as a canary: if the entry-point swap were lost, the
+    // replacement would return this MIN_VALUE instead of the original's answer. hook_function settles
+    // the target off the quick resolution stub before capture, so calling through runs the original.
     static int static_backup(int value) {
         Log.e(TAG, "static_backup ran its own body");
         return Integer.MIN_VALUE;
@@ -221,9 +223,10 @@ class DispatchCases {
             return fail("expected the monitor NOT to be held inside the replacement");
         }
 
-        // Calling through does restore it: the backup jumps to the snapshot's pre-hook entry point,
-        // and the snapshot still carries ACC_SYNCHRONIZED, so ART's entry sequence locks the
-        // receiver exactly as it would have. Only the replacement's own code runs unprotected.
+        // Calling through does restore it: the backup's trampoline enters the target's real
+        // ArtMethod at its pre-hook entry point, and that ArtMethod still carries ACC_SYNCHRONIZED,
+        // so ART's entry sequence locks the receiver exactly as it would have. Only the
+        // replacement's own code runs unprotected.
         if (!original_body_held_lock) {
             return fail("expected the monitor to be held once the backup reached the original body");
         }

@@ -20,6 +20,15 @@
     public final void flag_probe_b();
 }
 
+# ResolutionStubProbe is loaded but never initialized so its static native sits on the quick
+# resolution stub, whose address the library measures at startup. R8 sees the class and its method
+# as unused (nothing calls them -- that is the point) and would strip or rename them; either breaks
+# the measurement, so the class disables its static-target settling and static backups can recurse.
+# The <clinit> and the method's exact name both matter, so keep the whole class.
+-keep class com.arthooks.ArtHooks$ResolutionStubProbe {
+    *;
+}
+
 # Note for consumers: this file cannot protect *your* hooks. A hooked method, its replacement and
 # its backup are all located by exact name and signature, so keep them yourself, e.g.
 #

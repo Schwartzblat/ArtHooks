@@ -146,14 +146,51 @@ public class ArtHooks {
      * rather than installed, because the alternative is a hook that reports success and returns the
      * wrong value from then on.
      *
-     * <p>A {@code static} target is the exception, and is only warned about: backing one up is
-     * unreliable in a release build whether or not the backup is native, and the rule that would
-     * make it work is not known yet. See the TODO in the README.</p>
+     * <p>A {@code static} target does not need the native rule. An AOT-compiled or {@code native}
+     * static method sits on the quick resolution stub until its class is <em>visibly</em>
+     * initialized, and a backup captured from that stub would recurse into the hook -- so this
+     * settles the target off the stub before capturing its entry point, and refuses a static target
+     * it cannot move off the stub rather than installing a backup that would recurse.</p>
      *
      * <p>Returns false on failure.
      */
     public static native boolean hook_function(Executable original, Executable replacement,
                                                Executable backup);
+
+    /**
+     * Whether {@code method}'s entry point still holds the trampoline ArtHooks put there.
+     *
+     * <p>False for a method that was never hooked — and, more usefully, false for one whose hook ART
+     * has since overwritten. ART rewrites entry points for reasons of its own (class
+     * initialization, JIT compilation, deoptimization), and when that lands on a hooked method the
+     * hook is gone with nothing reporting it. This is how to find out.
+     */
+    public static native boolean is_hooked(Executable method);
+
+    /**
+     * Removes the most recent hook on {@code method}, restoring the entry point it displaced.
+     *
+     * <p>A method hooked twice has two hooks, and this removes one layer: the first call leaves the
+     * earlier hook in place and working, the second restores the original. Returns false if the
+     * method is not hooked.
+     *
+     * <p>Before restoring anything, this checks that the entry point still holds the trampoline this
+     * hook installed. If ART has since replaced it by some mechanism of its own — class
+     * initialization, JIT compilation, deoptimization — the address that would otherwise be restored
+     * is no longer trustworthy, so nothing is written; that stale record is discarded and this
+     * returns false. A hook and an unhook of the same method can never interleave, either: the check,
+     * the write and the bookkeeping all happen under one internal lock, so two such calls racing each
+     * other on the same method run one at a time, start to finish, rather than tearing.
+     *
+     * <p>The trampoline is not freed — another thread may be executing it, and there is no way to
+     * know when none is. Nor is {@code kAccCompileDontBother} cleared, because other hooks in a
+     * chain may still depend on ART not compiling the method.
+     *
+     * <p><b>This does not synchronize with calls in flight.</b> A thread already inside the
+     * replacement stays there, and one that has already loaded the entry point still jumps to the
+     * trampoline. Unhook when you know the method is quiet.
+     */
+    public static native boolean unhook_function(Executable method);
 
     private static native boolean init(int sdk_version);
 
@@ -181,5 +218,33 @@ public class ArtHooks {
     }
 
     private static void layout_probe_b() {
+    }
+
+    /**
+     * A class ART parks on the quick resolution stub, so the native side can measure that stub's
+     * address and later tell whether a static target is still sitting on it.
+     *
+     * <p>{@code Instrumentation::GetInitialEntrypoint} gives every method where
+     * {@code NeedsClinitCheckBeforeCall()} holds -- {@code static && !constructor} -- the quick
+     * resolution stub when the method is {@code native} (or AOT-compiled), and leaves it there until
+     * {@code ClassLinker::FixupStaticTrampolines} runs for its class. So a {@code static native}
+     * method of a class that is loaded but never initialized has the stub as its entry point, by
+     * construction.
+     *
+     * <p>This is a separate class, so it cannot disturb the {@code layout_probe_a/b} adjacency in
+     * {@code ArtHooks}' own method list. Its {@code <clinit>} calls a native ({@link System#nanoTime})
+     * that dex2oat cannot fold at build time, so no app image can pre-initialize it. The native side
+     * reaches {@code stub_probe} with {@code getDeclaredMethod} (which does not initialize the class)
+     * and never with {@code GetStaticMethodID} (which does), and never calls it -- the whole point is
+     * that it stays unresolved on the stub.
+     */
+    static final class ResolutionStubProbe {
+        static long marker;
+
+        static {
+            marker = System.nanoTime();
+        }
+
+        static native void stub_probe();
     }
 }

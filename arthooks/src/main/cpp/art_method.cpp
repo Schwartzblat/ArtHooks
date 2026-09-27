@@ -319,12 +319,20 @@ void *get_entry_point(const ArtMethod *art_method) {
     return __atomic_load_n(entry_point_slot(art_method), __ATOMIC_ACQUIRE);
 }
 
-void set_entry_point(ArtMethod *art_method, void *entry_point) {
+bool set_entry_point(ArtMethod *art_method, void *entry_point) {
     void **slot = entry_point_slot(art_method);
     make_page_writable(slot);
     // Another thread can be dispatching through this method right now, and the trampoline it may
     // pick up has to be fully written before the pointer to it becomes visible.
     __atomic_store_n(slot, entry_point, __ATOMIC_RELEASE);
+
+    void *stored = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+    if (stored != entry_point) {
+        LOGE("entry point write to %p did not take: wanted %p, read back %p",
+             art_method, entry_point, stored);
+        return false;
+    }
+    return true;
 }
 
 bool can_discourage_compilation() {

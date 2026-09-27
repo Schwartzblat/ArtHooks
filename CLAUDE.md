@@ -13,9 +13,10 @@ instrumentation-test harness, so "run the tests" means launch the app and read `
 by the JIT, so `tools/run-selftest.sh` is structurally blind to the whole AOT failure class.
 `tools/run-aot-selftest.sh` is the one that exercises it, and it takes the compiler filter as an
 argument so `speed` and `verify` can be compared directly — that difference is the signal. Currently:
-all 23 pass under `run-selftest.sh`, all 23 under `run-aot-selftest.sh verify`, and 19 of 23 under
-`run-aot-selftest.sh speed`, where the four failures are all the static-target-backup defect (see the
-last bullet in "Things that will bite you").
+all 30 pass under `run-selftest.sh`, all 30 under `run-aot-selftest.sh verify`, and all 30 under
+`run-aot-selftest.sh speed` — the static-target-backup defect that used to fail four `speed` cases is
+fixed by settling a static target off the resolution stub (see the last bullet in "Things that will
+bite you").
 
 ## Layout
 
@@ -27,6 +28,7 @@ arthooks/src/main/cpp/art_method.{hpp,cpp}         # ArtMethod struct mirror, la
 arthooks/src/main/cpp/class_init.{hpp,cpp}         # forcing <clinit> before a hook is installed
 arthooks/src/main/cpp/deoptimize.{hpp,cpp}         # stopping ART running AOT code; AOT detection
 arthooks/src/main/cpp/art_symbols.{hpp,cpp}        # resolving libart's exported symbols by name
+arthooks/src/main/cpp/hook_registry.{hpp,cpp}      # what each hook displaced; is_hooked(); unhook
 arthooks/src/main/cpp/log.hpp                      # LOGD/LOGI/... macros
 arthooks/consumer-rules.pro                        # R8 rules shipped to consumers
 app/src/main/java/com/example/arthooks/            # demo app + tests, see below
@@ -54,6 +56,7 @@ DispatchCases               # constructor, static+backup, private/final, interfa
 RuntimeCases                # boot-classpath target, chained hooks, install under concurrent calls
 LookupCases                 # find_function: each kind, overload picking, misses, find-then-hook
 ArityCases                  # backups whose arguments spill past the ABI's registers
+LifecycleCases              # unhooking: restores the original, unwinds a chained hook one layer
 Benchmark                   # throughput, for costing disable_aot(); only runs for --ez benchmark
 ```
 
@@ -137,10 +140,12 @@ must ship its own source under a compatible licence.
    That has to happen before any hook, because it rewrites entry points.
 2. `get_art_method()` turns a `java.lang.reflect.Method` into an `ArtMethod*` — on R+ by reading that
    `artMethod` long field, otherwise via `FromReflectedMethod()`.
-3. `hook_function()` forces both declaring classes to initialize, then overwrites *only* the
-   original's `entry_point_from_quick_compiled_code_` with a generated trampoline. The 3-arg overload
-   first snapshots the original `ArtMethod` into malloc'd memory and points the `backup` method's
-   entry point at a trampoline for that snapshot, so the original body stays callable.
+3. `hook_function()` forces both declaring classes to initialize (and, for a static target, settles
+   it off the resolution stub — see the last bullet in "Things that will bite you"), then overwrites
+   *only* the original's `entry_point_from_quick_compiled_code_` with a generated trampoline. The
+   3-arg overload first captures the original's pre-hook entry point and points the `backup` method's
+   entry point at a trampoline that names the *real* original `ArtMethod` but jumps to that captured
+   address, so the original body stays callable.
 
 `find_function(owner, name, signature)` is the other half of the API: it resolves a target by JNI
 descriptor (`"(Ljava/lang/String;I)V"`) instead of by `Class` objects, which is how you name one
@@ -251,9 +256,9 @@ stops the JIT inlining a hooked target as well as compiling it.
   so nothing here can fix it. `hook_function` logs a warning. Marking the replacement `synchronized`
   is only right for instance targets — a `static synchronized` method locks its declaring class, so
   a `static synchronized` replacement locks the wrong object. Calling through the backup *does*
-  re-acquire it — the snapshot still carries `ACC_SYNCHRONIZED`, so ART's entry sequence locks the
-  receiver — so the unprotected window is only the replacement's own code. `DispatchCases` asserts
-  both halves.
+  re-acquire it — the backup's trampoline enters the target's real `ArtMethod`, which still carries
+  `ACC_SYNCHRONIZED`, so ART's entry sequence locks the receiver — so the unprotected window is only
+  the replacement's own code. `DispatchCases` asserts both halves.
 - **Trampoline codegen in `trampoline.cpp` is per-ABI and all four are built.** Only arm64 is exercised
   on a real device here; the arm/x86/x86_64 encodings were checked against the NDK assembler. If you
   touch them, verify the emitted bytes disassemble to the intended instructions rather than eyeballing
@@ -301,13 +306,35 @@ stops the JIT inlining a hooked target as well as compiling it.
   generated resource class is `com.arthooks.R`, imported explicitly by `MainActivity`.
 - **`minSdk` is 33**, so the pre-R `FromReflectedMethod` branch in `get_art_method()` is currently
   unreachable. It is kept deliberately for lower-minSdk use; don't delete it as dead code.
-- **The backup's snapshot `ArtMethod` lives in malloc'd memory, so the GC never visits it.** Its
-  `declaring_class_` is a `GcRoot` that nothing will update. This is safe only because ART allocates
-  `mirror::Class` as non-movable; if that ever changes, backups become a use-after-move.
-- **There is no unhook.** Trampolines and snapshots are allocated for the lifetime of the process.
-  Hooking the same method twice chains, second hook outermost: the second backup snapshots an
-  already-hooked target, so calling through it runs the first hook, which calls through to the
-  original. `RuntimeCases.chained_hooks` pins that ordering down.
+- **The backup's trampoline names the *real* target `ArtMethod`, not a copy.** It captures the
+  target's pre-hook entry-point address and jumps to it, so the target's `declaring_class_` GcRoot is
+  still the live one the GC updates when it relocates the class — a detached malloc'd copy would not
+  get that fixup, and nterp reads `declaring_class_` on every call. `backup_survives_a_relocating_gc`
+  pins this down. (An earlier version of this file, and of the code, used a malloc'd snapshot; it
+  does not any more.)
+- **Unhooking exists, but trampolines are never freed.** `hook_registry.cpp`'s `install_hook()` and
+  `remove_hook()` do the `ArtMethod` write themselves, under the registry's own lock, precisely so a
+  hook and an unhook of the *same* target cannot interleave -- an earlier version of this code split
+  "read/write the entry point" from "update the registry" into two separately-locked steps, which left
+  two gaps: a failed restoring write could still drop the registry entry (leaving a live trampoline
+  with nothing naming it, so `is_hooked()` would answer wrongly and a second unhook would write a
+  now-wrong "previous" address over a still-live outer hook), and a stale record -- one whose entry
+  point ART had since overwritten by some mechanism of its own -- could get its "previous" address
+  written back on top of whatever ART had put there. `remove_hook()` now re-checks the live entry
+  point against the record before trusting it, and only drops a record once its restoring write is
+  *verified*; a write that does not take leaves the record in place rather than losing it. Hooking the
+  same method twice still chains, second hook outermost -- the second backup captures an
+  already-hooked target's entry point, so calling through it runs the first hook, which calls through
+  to the original (`RuntimeCases.chained_hooks` pins that ordering down) -- and the first
+  `unhook_function()` call removes only the outer layer, leaving the inner hook in place and working;
+  the second restores the original. `LifecycleCases` pins both cases down, plus idempotence: calling
+  `unhook_function()` on a method that is not hooked returns false rather than doing anything.
+  The trampoline itself is still never freed -- another thread can be inside it right now, there is no
+  way to know when none is, and trampolines are bump-allocated out of a shared page nothing can return
+  memory to anyway. Nor is `kAccCompileDontBother` cleared, because a chain's remaining hooks may still
+  depend on ART not compiling the method. **Unhooking does not synchronize with calls in flight** -- a
+  thread already inside the replacement stays there, and one that has already loaded the entry point
+  still jumps to the trampoline.
 - **Boot-classpath targets work from app call sites, and from inside the framework only after the
   boot image is deoptimized.** `RuntimeCases` hooks `StringTokenizer.countTokens()` and the app's
   calls land in the replacement. Framework-internal callers used to keep running the original,
@@ -316,22 +343,37 @@ stops the JIT inlining a hooked target as well as compiling it.
   executing keep running what they had.
 - `artMethod` is a non-SDK field. If `GetFieldID` ever fails on a newer platform, check hidden-API
   enforcement first — `init()` returns false and logs, and every later call refuses to run.
-- **Backing up a `static` target can recurse, and it is ART's doing, not the backup's shape.**
-  `Instrumentation::GetInitialEntrypoint()` gives a method the quick *resolution stub* while
-  `ArtMethod::NeedsClinitCheckBeforeCall()` holds — exactly `IsStatic() && !IsConstructor()` — and
-  leaves it there until the declaring class is **visibly** initialized. On arm64 that transition is
-  batched: `ClassLinker::MarkClassInitialized()` sets only `kInitialized` and queues a
-  `VisiblyInitializedCallback`, and `FixupStaticTrampolines()` — which installs the real entry
-  point — waits for that callback. So `install_backup()` can capture the stub; calling the backup
-  re-enters it, it re-reads `entry_point_from_quick_compiled_code_`, finds the hook, and lands in
-  the replacement. The exact trigger is `(aot_code != nullptr || IsNative(flags))` — note that it
-  is **not** `CanUseAotCode()`, so `disable_aot()` does not touch this branch; what decides it is
-  whether dex2oat compiled the method at all. Hence: fails under `-m speed`, passes under
-  `-m verify`, and never shows up in a debug build because a debuggable APK is compiled `verify`.
-  `kRuntimeISA == kX86` skips the batching, so this should not reproduce on x86 at all. Fixing it needs
-  `ClassLinker::MakeInitializedClassesVisiblyInitialized()`, and reaching that means finding
-  `Runtime::GetClassLinker()`'s result — an inline accessor over an unmeasurable struct offset. Do
-  not confuse this with the inlined-backup rule: they look identical from the outside and have
-  nothing in common.
+- **A `static` target on the resolution stub is settled before its entry point is touched — do not
+  regress this.** `Instrumentation::GetInitialEntrypoint()` gives a method the quick *resolution
+  stub* while `ArtMethod::NeedsClinitCheckBeforeCall()` holds — exactly `IsStatic() &&
+  !IsConstructor()` — when it is AOT-compiled or `native`, and leaves it there until the declaring
+  class is **visibly** initialized. On arm64 that transition is batched: `MarkClassInitialized()`
+  sets only `kInitialized` and queues a `VisiblyInitializedCallback`, and `FixupStaticTrampolines()`
+  — which installs the real entry point — waits for that callback. So a backup captured from the stub
+  re-dispatches through the hook and recurses (observed). A hook written onto the stub also sits under
+  a fixup that has not run; reading AOSP suggests the fixup could overwrite it, but Task 1's
+  `static_hook_survives_visible_initialization` wrote one onto the stub under `speed`, forced the
+  fixup, and the hook survived — so treat that as unproven, not as a known failure. The exact trigger
+  is `(aot_code != nullptr || IsNative(flags))` — **not**
+  `CanUseAotCode()`, so `disable_aot()` does not touch this branch; what decides it is whether dex2oat
+  compiled the method at all. Hence it used to fail under `-m speed`, pass under `-m verify`, and
+  never show up in a debug build (a debuggable APK is compiled `verify`).
+
+  `ensure_class_visibly_initialized()` in `class_init.cpp` fixes it. The `Runtime::GetClassLinker()`
+  route to `MakeInitializedClassesVisiblyInitialized()` is an inline accessor over an unmeasurable
+  struct offset and is *not* used. Instead the quick resolution stub's address is **measured** at
+  startup — the same measure-don't-assume move as `sizeof(ArtMethod)` — from
+  `ArtHooks.ResolutionStubProbe`, a class loaded but never initialized whose `static native` method
+  sits on the stub by construction (validated: non-null, inside `libart.so`, and different from a
+  resolved native's entry, else it falls back to watching the target's own entry move, treating
+  "never moved" as already settled and hooking with a warning that a backup may recurse). A static
+  target found on that stub is nudged off it with `Class.forName(name, true, loader)` — which trips
+  `ClassLinker::EnsureInitialized`'s per-thread counter and makes ART flush the batch — before
+  `install_backup()` or the entry-point write; a target that will not leave the stub is **refused**.
+  `kRuntimeISA == kX86` skips the batching, so the stub case should not arise on x86 at all. Do not
+  confuse this with the inlined-backup rule: they look identical from the outside and have nothing in
+  common. The residual case — a static target of a not-visibly-initialized class that is *not* on the
+  stub (no AOT code, e.g. debug: it starts on the interpreter bridge) — is narrowed, not closed, but
+  does not recurse because the bridge runs the original body directly.
 - `release` builds set `optimization { enable false }` — R8 is off, which matters because the hooked
   and hooking methods must survive by exact name and signature.

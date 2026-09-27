@@ -65,7 +65,14 @@ ArtMethod *get_art_method(JNIEnv *env, jobject executable);
 
 void *get_entry_point(const ArtMethod *art_method);
 
-void set_entry_point(ArtMethod *art_method, void *entry_point);
+/**
+ * Writes an entry point, and reports whether the write is visible afterwards.
+ *
+ * The store can silently not happen -- a read-only mapping is the plausible cause -- and a hook
+ * that did not take looks exactly like one that did from the caller's side. Reading it back is the
+ * only thing that distinguishes them.
+ */
+bool set_entry_point(ArtMethod *art_method, void *entry_point);
 
 /**
  * Asks ART not to JIT-compile this method, by setting kAccCompileDontBother on it.

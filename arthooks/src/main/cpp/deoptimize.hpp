@@ -58,4 +58,13 @@ bool aot_code_disabled();
  */
 bool is_aot_code(const void *entry_point);
 
+/**
+ * Whether `address` falls inside the mapping backed by libart.so.
+ *
+ * Used to validate the measured resolution-stub address: every ART stub -- the resolution
+ * trampoline included -- lives in libart.so, so a measured "stub" that is not inside libart is not
+ * the stub. Shares the /proc/self/maps walk with is_aot_code().
+ */
+bool is_in_libart(const void *address);
+
 #endif //ARTHOOKS_DEOPTIMIZE_HPP

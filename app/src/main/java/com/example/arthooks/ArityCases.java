@@ -24,12 +24,12 @@ import static com.example.arthooks.Checks.with_thiz;
  * failure in all of them means the stack argument is the problem; a failure in only the constructor
  * means constructors are.
  *
- * <p>The two {@link StaticTarget} cases pass in a debug build and FAIL in a release one, where the
- * backup recurses into the replacement until the stack runs out -- at either arity, under both
- * compiler filters, and whether or not the backup is native. DispatchCases.static_target_with_backup
- * fails the same way in a release build, so this is not new and not about argument slots: backing up
- * a static target is simply unreliable. A separate defect from the inlined-backup one these cases
- * were written for, and not fixed.
+ * <p>The two {@link StaticTarget} cases once failed in a release build compiled {@code speed}, where
+ * the backup recursed into the replacement until the stack ran out. That was a separate defect from
+ * the inlined-backup one these cases were written for: an AOT-compiled static method sits on the
+ * quick resolution stub until its class is visibly initialized, and a backup built on that stub
+ * re-dispatches through the hook. {@code hook_function} now settles a static target off the stub
+ * before capturing its entry point (see {@code class_init.cpp}), so these pass under both filters.
  */
 class ArityCases {
 

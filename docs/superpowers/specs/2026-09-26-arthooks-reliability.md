@@ -43,7 +43,7 @@ Consequences that matter here:
 | | Frida | ArtHooks |
 |---|---|---|
 | captures an entry point as "the original" | **no** — calls the untouched original via JNI | yes, which is the whole static-backup bug |
-| survives `FixupStaticTrampolines` | hooks `VisiblyInitializedCallback::MarkVisiblyInitialized` and re-applies | **unverified — see §5.1** |
+| survives `FixupStaticTrampolines` | hooks `VisiblyInitializedCallback::MarkVisiblyInitialized` and re-applies | settles the target off the resolution stub *before* writing its entry point — see §5.1 |
 | `synchronized` semantics | correct, free: the replacement *is* native, so the generic JNI trampoline takes the monitor | replacement does not hold it |
 | unhook | full revert; the original was never modified | none |
 | AOT inlining | **opt-in only**, and its own docs recommend `dex2oat-flags --inline-max-code-units=0` | handled by default since `disable_aot()` |
@@ -151,12 +151,41 @@ Measured 2×2 (release APK, self-test):
   `strings` 6.2x and `hashmap` 3.4x under `disable_aot()` versus 1.4x and 1.2x under `vmSafeMode`.
 - Cold start on the demo: 89 ms baseline, 95 ms `vmSafeMode`, 124 ms `disable_aot()`.
 
-**Implication:** `DeoptimizeBootImage()` is the expensive half and buys only boot-classpath hooks
-called from inside the framework. It should not be automatic.
+**Update, 2026-09-26 (Pixel 9a, API 36, `tools/run-benchmark.sh 3`):** the attribution above was
+tested directly and refuted. Task 5 made `disable_aot_code()` take a `deoptimize_boot_image`
+parameter, defaulting to off, so `DeoptimizeBootImage()` no longer ran unless asked for. All 30
+self-test checks still passed with it off, including the boot-classpath case
+(`RuntimeCases.cross_dex_replacement`, which calls from the app and needs nothing extra). But with
+the boot image left alone, the `AOT + disable_aot` first-round figures for the two rows above did
+not move toward `vmSafeMode only`:
+
+| workload | `AOT + disable_aot`, boot image deoptimized (before) | `AOT + disable_aot`, boot image left alone (after) | `vmSafeMode only` (before) | `vmSafeMode only` (after) |
+|---|---|---|---|---|
+| strings | 35.4ms / 6.5x | 32.3ms / 6.0x | 7.8ms / 1.4x | 4.7ms / 0.9x |
+| hashmap | 100.8ms / 2.5x | 100.5ms / 3.1x | 41.2ms / 1.0x | 42.2ms / 1.3x |
+
+`strings` barely moved (6.5x → 6.0x); `hashmap` moved the wrong way (2.5x → 3.1x). The raw
+before/after deltas alone are not trustworthy here: unrelated, non-boot-classpath workloads swung
+just as widely between the two separate script invocations from device noise alone —
+`accessors` went 203.5x → 31.9x, and nothing about that row is affected by this change. The
+comparison worth trusting is the *within-run* gap between `AOT + disable_aot` and `vmSafeMode
+only`, since both columns are interleaved within one script invocation and share the same thermal
+conditions: strings' gap widened (6.5/1.4 = 4.6x before → 6.0/0.9 = 6.7x after) and hashmap's gap
+held (2.5/1.0 = 2.5x before → 3.1/1.3 = 2.4x after). Neither collapsed toward 1x the way giving up
+`DeoptimizeBootImage()` should have produced if it were the expensive half. Full data:
+`.superpowers/sdd/PLAN/benchmark-before.txt` and `benchmark-after.txt`; full analysis:
+`.superpowers/sdd/PLAN/task-5-report.md`. The split was reverted; `disable_aot()` deoptimizes the
+boot image unconditionally again.
+
+**Implication:** the first-round cost is not specifically `DeoptimizeBootImage()`'s. It comes from
+the runtime being made Java-debuggable at all — the same state that makes every other workload's
+first run 12x–200x slower, with `Jit::TryPatternMatch`'s `IsJavaDebuggable()` gate as the one
+confirmed contributor above. Splitting the boot-image half out as an opt-in parameter was tried and
+measured, and it bought nothing on this device/build. Do not re-attempt it without new evidence.
 
 ## 5. Open problems this plan addresses
 
-### 5.1 Static hooks may be silently clobbered — UNVERIFIED, highest priority
+### 5.1 Static hooks may be silently clobbered — not reproduced; foreclosed by settling first
 
 `ClassLinker::FixupStaticTrampolines` (`class_linker.cc`) runs when a class becomes visibly
 initialized and does, for every direct method where `NeedsClinitCheckBeforeCall()` holds:
@@ -166,16 +195,33 @@ const void* quick_code = instrumentation->GetCodeForInvoke(method);
 ... UpdateMethodsCode(method, quick_code) ...
 ```
 
-`hook_function()` forces `<clinit>` via `ensure_class_initialized()` and then writes its trampoline
-into the entry point. If the class was not *already* visibly initialized, the batched callback fires
-**after** the hook is installed and overwrites it. The hook would work briefly and then vanish, with
-nothing reporting an error.
+Read on its own, that suggests a trampoline `hook_function()` wrote into a static target's entry
+point *before* the callback fired could be overwritten by it. That reading was the hypothesis. It
+shares a precondition with §4.3's backup recursion — a static target of a class that is not yet
+visibly initialized, parked on the quick resolution stub — but only the recursion has been observed.
 
-`HookSelfTest.static_target_is_hooked_and_initialized` cannot catch this: it checks immediately,
-before the batch flushes.
+**What was observed.** Task 1's `HookSelfTest.static_hook_survives_visible_initialization()` hooks
+`LateVisible.describe()` with no settling, forces the visible-init flush with 2048
+`Class.forName(name, true, loader)` calls, and re-checks the hook. It passed under both
+`run-selftest.sh` and `run-aot-selftest.sh speed`. Task 2's library logs now show where that target
+was at hook time on the Pixel 9a / API 36 / arm64 (verbatim `ArtHooks`-tag lines):
 
-This has **not been reproduced**. Task 1 of the plan exists to prove or disprove it, and the plan
-must not claim it is real until that test fails for this reason.
+- **`tools/run-selftest.sh`** (debug APK, no AOT code): `static target
+  com.example.arthooks.HookSelfTest$LateVisible is not on the resolution stub; no settling needed`.
+- **`tools/run-aot-selftest.sh speed`**: `static target
+  com.example.arthooks.HookSelfTest$LateVisible was on the resolution stub; left it after 128 nudges`.
+
+So under `speed` the target is on the stub at hook time, and 128 nudges were enough to move it off.
+Task 1's run therefore wrote its hook onto the stub and then called `Class.forName` 2048 times — far
+more than the flush needed — and the hook was still there afterwards. The one observation available
+is that a hook written before the fixup survived it (consistent with the fixup leaving alone an entry
+point that is no longer the stub, though that was not checked against the source). The clobber is
+therefore **not reproduced**. The demonstrated failure in this area is §4.3's recursion.
+
+**What Task 2 changes.** `hook_function` now settles a static target off the resolution stub before
+reading or writing its entry point, and refuses one it cannot move off. That forecloses the clobber
+by construction — no hook is written while a fixup is pending — whether or not the clobber is
+reproducible, and it is what fixes §4.3: success criterion 1 is met, 27/27 under `-m speed`.
 
 ### 5.2 `disable_aot()` misses already-linked classes
 
