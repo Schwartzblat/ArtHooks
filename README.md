@@ -259,12 +259,12 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.0.5'
+    implementation 'com.github.Schwartzblat.ArtHooks:arthooks:1.1.0'
 }
 ```
 
 The group is the *repository* and the artifact is the *module*, because this is a multi-module
-build — `com.github.Schwartzblat:ArtHooks:1.0.5`, the single-module form, will not resolve.
+build — `com.github.Schwartzblat:ArtHooks:1.1.0`, the single-module form, will not resolve.
 
 Any git tag works as a version, and so does `main-SNAPSHOT` for the tip of the branch. The first
 request for a given tag makes JitPack build it, which takes a few minutes and can fail; the log is
@@ -296,7 +296,7 @@ dependencyResolutionManagement {
 ```groovy
 // app/build.gradle
 dependencies {
-    implementation 'com.arthooks:arthooks:1.0.5'
+    implementation 'com.arthooks:arthooks:1.1.0'
 }
 ```
 
@@ -342,11 +342,11 @@ have to reproduce later.
 Push a **bare semver tag** — no `v` prefix:
 
 ```bash
-git tag 1.0.5 && git push origin 1.0.5
+git tag 1.1.0 && git push origin 1.1.0
 ```
 
 The prefix matters here in a way it usually does not: **JitPack serves a tag under its literal
-name**, so tag `v1.0.5` would make the dependency `...:arthooks:v1.0.5`. The workflow still matches
+name**, so tag `v1.1.0` would make the dependency `...:arthooks:v1.1.0`. The workflow still matches
 `v*` tags so an old-style one releases rather than silently doing nothing, and it strips the `v` from
 the version inside the artifacts — but the JitPack coordinate keeps whatever you typed.
 
