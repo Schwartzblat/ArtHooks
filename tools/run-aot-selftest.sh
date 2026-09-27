@@ -62,8 +62,11 @@ adb wait-for-device
 # the two can differ, and installing a release APK signed with a different key over that fails with
 # INSTALL_FAILED_UPDATE_INCOMPATIBLE. Drop whatever is there first; "not installed" is fine.
 adb uninstall "$package" > /dev/null 2>&1 || true
-# -d allows the downgrade from whatever versionCode a debug install left behind.
-adb install -r -d "$signed" > /dev/null
+# -d allows the downgrade from whatever versionCode a debug install left behind. --no-incremental
+# because an incremental install puts the app on incremental-fs, where API 33's package manager
+# creates no oat/ directory: dex2oat's output lands in /data/dalvik-cache instead, ART still runs
+# it, but `dumpsys package dexopt` looks only in oat/ and reports run-from-apk.
+adb install --no-incremental -r -d "$signed" > /dev/null
 
 echo "compiling $package with -m $filter..."
 adb shell cmd package compile -m "$filter" -f "$package" > /dev/null
