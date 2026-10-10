@@ -109,11 +109,23 @@ Four things make that work, and each is easy to undo by accident:
   default, so pinning changed nothing locally.
 - **`jitpack.yml` deliberately has no `install:` command.** JitPack's default already runs
   `publishToMavenLocal` with the right `-Pgroup`/`-Pversion`; overriding it would mean hard-coding
-  the coordinate. The file only picks the launcher JVM and pre-installs the NDK and CMake.
+  the coordinate. The file only picks the launcher JVM, pre-installs the NDK and CMake, and pins the
+  daemon JVM (next bullet).
+- **On JitPack the daemon runs on JDK 17, not 26.** `before_install` rewrites
+  `gradle-daemon-jvm.properties` to `toolchainVersion=17` in JitPack's checkout, so the daemon reuses
+  the `openjdk17` launcher. Some JitPack hosts (4.10/4.14 kernels) have a seccomp profile that makes
+  `statx` fail with EPERM, and JDK 22+ has no fallback for that (JDK-8337966 was fixed only in 17.0.14
+  and 21.0.6; mainline declined it), so a JDK 26 daemon cannot open any jar and dies with
+  `ClassNotFoundException: org.gradle.instrumentation.agent.Agent` before the build starts. Every
+  1.1.1 build that landed on such a host failed that way; which host a build gets is luck, which is why
+  1.0.x and 1.1.0 never hit it. Do not drop the `sed`. To reproduce locally, run the build under a
+  seccomp filter that returns EPERM for `statx` (a few lines of `prctl(PR_SET_SECCOMP)` and `execvp`;
+  Docker's `--security-opt seccomp` cannot do it, because runc itself calls `statx` while setting up the
+  container).
 
-The `jdk:` in `jitpack.yml` is only the JVM that launches the Gradle wrapper. Gradle then provisions
-its own daemon JVM (26) from the URLs in `gradle/gradle-daemon-jvm.properties`, so the two do not
-have to match.
+Outside JitPack, the `jdk:` in `jitpack.yml` is irrelevant: Gradle provisions the daemon JVM (26)
+from the URLs in `gradle/gradle-daemon-jvm.properties`, so the launcher and daemon do not have to
+match.
 
 The `release` CI job fires on any tag matching `[0-9]*` or `v[0-9]*`. It builds under the coordinate
 JitPack serves, attaches the AAR, POM, sources jar and `SHA256SUMS.txt` to the GitHub release, then

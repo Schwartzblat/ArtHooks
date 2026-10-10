@@ -7,13 +7,20 @@
 # publishToMavenLocal with -Pgroup= and -Pversion= set to the coordinate it intends to serve, and
 # arthooks/build.gradle honours both. Overriding it would mean hard-coding those values.
 
-# Only the JVM that launches the Gradle wrapper. Gradle then provisions its own daemon JVM (26)
-# from the URLs in gradle/gradle-daemon-jvm.properties, so this does not have to match the toolchain.
+# The JVM that launches the Gradle wrapper -- and, on JitPack, the daemon too (see below).
 jdk:
   - openjdk17
 
 # The library is mostly C++, so the build needs an NDK and CMake, not just the Android SDK. These
 # are large; if a JitPack build times out, this is the first place to look.
 before_install:
+  # Run the daemon on the launcher's JDK 17 here instead of the JDK 26 gradle-daemon-jvm.properties
+  # asks for everywhere else. Some JitPack build hosts are old enough that their seccomp profile
+  # makes statx(2) fail with EPERM, and JDK 22+ does not fall back from that (JDK-8337966; the fix
+  # went into 17.0.14 and 21.0.6 only), so a JDK 26 daemon cannot open a single jar: it dies with
+  # ClassNotFoundException: org.gradle.instrumentation.agent.Agent before the build starts. That is
+  # what failed every 1.1.1 build that landed on such a host. Nothing in this build needs 26 -- the
+  # AAR comes out identical, Java 11 bytecode either way -- so this only affects JitPack's checkout.
+  - sed -i 's/^toolchainVersion=.*/toolchainVersion=17/' gradle/gradle-daemon-jvm.properties
   - yes | sdkmanager --licenses > /dev/null 2>&1 || true
   - sdkmanager --install "platforms;android-36" "ndk;28.2.13676358" "cmake;3.22.1" > /dev/null
