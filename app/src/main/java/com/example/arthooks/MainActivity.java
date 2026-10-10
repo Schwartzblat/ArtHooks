@@ -23,6 +23,9 @@ public class MainActivity extends Activity {
             return;
         }
 
+        // Before HookExample touches ArtHooks: this links a class with its AOT bodies the way an
+        // app image would, which is what EarlyLinkCases then checks a hook still reaches.
+        EarlyLinkCases.link();
         HookExample.on_load();
         HookSelfTest.run();
     }

@@ -19,4 +19,19 @@
  */
 void *find_libart_symbol(const char *name);
 
+/**
+ * Finds the GOT slot libart.so's own PLT loads its target from when libart calls the exported
+ * function `name`.
+ *
+ * libart reaches its own exported functions through the PLT like any outside caller would -- a call
+ * to ClassLinker::VisitClasses from inside libart assembles to `bl VisitClasses@plt`, which jumps
+ * wherever this slot points. Pointing the slot somewhere else therefore intercepts libart's internal
+ * calls to that function, which is how a value libart only ever passes *as an argument* can be read
+ * without knowing the layout of anything it was read out of.
+ *
+ * Returns nullptr when libart's PLT relocations name no such symbol. A libart linked with
+ * -Bsymbolic, which binds its own calls directly, is the expected way to get that answer.
+ */
+void **find_libart_plt_slot(const char *name);
+
 #endif //ARTHOOKS_ART_SYMBOLS_HPP

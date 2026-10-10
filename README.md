@@ -12,12 +12,13 @@ demo that also carries the test suite).
 
 ## Status
 
-Verified end to end on a Pixel 9a running Android 16 (API 36), arm64-v8a, with 30 self-test checks
-covering return shapes, dispatch kinds, argument lists that spill to the stack, JIT survival,
-concurrent installation, static targets whose class is not yet visibly initialized, and unhooking a
-single or a chained hook. All 30 pass in a debug build, all 30 in a **release** build compiled
-`verify`, and all 30 in a release build compiled `speed` — the harshest case, where dex2oat has
-compiled everything. See [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
+Verified end to end on Android 16 (API 36), arm64-v8a, with 31 self-test checks covering return
+shapes, dispatch kinds, argument lists that spill to the stack, JIT survival, concurrent
+installation, static targets whose class is not yet visibly initialized, a caller ART linked before
+the library loaded, and unhooking a single or a chained hook. All 31 pass in a debug build, all 31 in
+a **release** build compiled `verify`, and all 31 in a release build compiled `speed` — the harshest
+case, where dex2oat has compiled everything. The first 30 were measured on a Pixel 9a; all 31 on a
+Galaxy S25+. See [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
 
 Four ABIs are built. Only arm64-v8a has been exercised on hardware; the armeabi-v7a, x86_64 and x86
 trampoline encodings were verified by disassembling the emitted bytes against the NDK assembler.
@@ -86,10 +87,14 @@ not `ApplicationInfo.FLAG_DEBUGGABLE`, and it is invisible to the app and to a d
 
 Three things to know:
 
-- **It only covers classes ART has not linked yet.** Touch `com.arthooks.ArtHooks` as early as you
-  can — `Application.attachBaseContext` is the usual place — so this runs before the code you intend
-  to hook, and that code's callers, are first loaded. Hooking a target that is still on AOT code
-  logs a warning under the `ArtHooks` tag naming exactly that.
+- **It also covers classes ART had already linked — from Android 14.** A `speed-profile` install
+  ships an app image, and ART links every class in it, compiled code included, the moment the class
+  loader opens: before any of the app's code runs, so before this library can. Those classes are
+  moved off their AOT code too, by `Instrumentation::UpdateEntrypointsForDebuggable()`, the routine
+  ART itself runs when a debugger makes an already-running app debuggable. Android 13's libart has
+  no such routine, so there it only covers classes ART has not linked yet: touch
+  `com.arthooks.ArtHooks` as early as you can — `Application.attachBaseContext` is the usual place.
+  Either way, hooking a target that is still on AOT code logs a warning under the `ArtHooks` tag.
 - **It costs performance, and the cost is all in cold code.** Measured on a Pixel 9a with
   `tools/run-benchmark.sh` (minimum of 3 interleaved passes, so DVFS and thermal drift cannot pick a
   winner):
@@ -118,9 +123,13 @@ Three things to know:
 
   `ArtHooks.is_aot_disabled()` reports whether it actually happened.
 - **It needs libart to export three symbols** (`art::Runtime::instance_`,
-  `SetRuntimeDebugState`, `DeoptimizeBootImage`). They are resolved by name out of the already-mapped
-  libart.so; a platform that renames or hides one makes `disable_aot()` return false and change
-  nothing, rather than guessing at a struct offset.
+  `SetRuntimeDebugState`, `DeoptimizeBootImage`), plus `UpdateEntrypointsForDebuggable` for the
+  already-linked classes. They are resolved by name out of the already-mapped libart.so; a platform
+  that renames or hides one makes `disable_aot()` do less and log why, rather than guessing at a
+  struct offset. The one value no exported symbol yields — the `Instrumentation*` that
+  `UpdateEntrypointsForDebuggable` runs on — is read out of the visitor `DeoptimizeBootImage` passes
+  to `ClassLinker::VisitClasses`, through libart's own PLT slot for that call, and checked against
+  `art::Runtime`'s own words before anything uses it.
 
 If you control the manifest of the app being hooked — repackaging an APK, say — `android:vmSafeMode`
 is a belt-and-braces alternative that needs no ART internals at all. It makes the package manager
@@ -395,7 +404,7 @@ suite takes about six seconds to finish, most of it deliberately waiting for the
 ```bash
 ./tools/run-selftest.sh     # installs, runs, and exits non-zero unless every check passed
 
-adb logcat -s HookSelfTest  # 30 checks, then "PASS: all checks passed"
+adb logcat -s HookSelfTest  # 31 checks, then "PASS: all checks passed"
 adb logcat -s ArtHooks      # native log tag
 ```
 
@@ -452,11 +461,12 @@ runs both.
 
   A `static synchronized` method locks its *declaring class*, so a `static synchronized` replacement
   would lock the replacement's own class — the wrong object, and no error.
-- **A target whose class ART linked before ArtHooks loaded may still have been inlined away.**
-  Dropping AOT code only governs classes linked afterwards, so a class that was already in use keeps
-  the bodies dex2oat gave it, and a caller that inlined the target has no call left to redirect.
-  This is now *detected* — hooking a target that is still on AOT code logs a warning naming it — but
-  it cannot be repaired after the fact. Load `ArtHooks` as early as you can. See
+- **On Android 13, a target whose class ART linked before ArtHooks loaded may still have been
+  inlined away.** Its libart cannot move already-linked classes off their AOT code, so such a class
+  keeps the bodies dex2oat gave it, and a caller that inlined the target has no call left to
+  redirect. It is *detected* — hooking a target that is still on AOT code logs a warning naming it —
+  but not repaired. Load `ArtHooks` as early as you can. From Android 14 the already-linked classes
+  are rewritten at load, app image included. See
   [AOT](#aot-and-why-hooks-used-to-break-in-release-builds).
 - **Boot-classpath targets work from app call sites, and from inside the framework only once the
   boot image has been deoptimized** — which `disable_aot()` does, but again only for frames entered

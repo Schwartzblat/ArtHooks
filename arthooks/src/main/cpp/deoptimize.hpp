@@ -23,21 +23,33 @@
  * debuggable", in its own words. Telling the runtime it is Java-debuggable therefore makes
  * `ClassLinker::LinkCode` give every method ART links from then on an interpreter entry point
  * instead, upgraded to nterp once its class verifies. Calls go through the ArtMethod again, so
- * hooks fire. Deoptimizing the boot image does the same for framework code that was already linked.
+ * hooks fire.
+ *
+ * Classes ART linked *before* that keep their AOT bodies unless they are rewritten too, and there
+ * can be thousands: a `speed-profile` install comes with an app image, which ART maps -- linking
+ * every class in it, compiled code included -- when the class loader opens, before any app code
+ * runs. So this then does what ART does when a debugger makes an already-running app debuggable:
+ * `Runtime::DeoptimizeBootImage()` for the framework, and
+ * `Instrumentation::UpdateEntrypointsForDebuggable()` (Android 14+) for everything else.
  *
  * Three consequences worth knowing before calling it:
  *
- * - **It only helps classes ART has not linked yet.** A class whose methods already hold AOT entry
- *   points keeps them. Call this before the code you intend to hook, and its callers, are first
+ * - **On Android 13 it only helps classes ART has not linked yet.** Its libart has no
+ *   UpdateEntrypointsForDebuggable(), so an already-linked class keeps its AOT entry points there
+ *   (logged at init). Call this before the code you intend to hook, and its callers, are first
  *   touched -- which init() does, by running it at library load.
  * - **It costs performance, process-wide.** The app runs nterp plus JIT rather than AOT code, and
  *   while debuggable the JIT compiles without inlining.
  * - **It rewrites entry points**, so it has to happen before any hook is installed, or the hook is
  *   overwritten.
  *
- * Every address it uses is a symbol libart.so exports by name; nothing here indexes a runtime
- * struct. A platform that renames or stops exporting one makes this return false and change
- * nothing -- the same "measure, don't assume" bargain as the ArtMethod layout.
+ * Every function it calls is a symbol libart.so exports by name, and nothing here indexes a runtime
+ * struct. UpdateEntrypointsForDebuggable() needs the Runtime's Instrumentation* as `this`, which
+ * only an inline accessor returns; it is read instead out of the visitor DeoptimizeBootImage()
+ * passes to ClassLinker::VisitClasses, by pointing libart's own PLT slot for that call at a
+ * pass-through for its duration, and checked against Runtime's own words before it is used. A
+ * platform that renames or stops exporting what this needs makes it do less and say so -- the same
+ * "measure, don't assume" bargain as the ArtMethod layout.
  */
 bool disable_aot_code();
 

@@ -49,6 +49,7 @@ public class HookSelfTest {
                     && settled_and_single_static_classes()
                     && throwing_class_initializer_fails_the_hook()
                     && a_successful_hook_is_actually_installed()
+                    && EarlyLinkCases.check()
                     && SignatureCases.check()
                     && DispatchCases.check()
                     && RuntimeCases.check()

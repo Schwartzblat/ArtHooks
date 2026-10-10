@@ -13,7 +13,7 @@ instrumentation-test harness, so "run the tests" means launch the app and read `
 by the JIT, so `tools/run-selftest.sh` is structurally blind to the whole AOT failure class.
 `tools/run-aot-selftest.sh` is the one that exercises it, and it takes the compiler filter as an
 argument so `speed` and `verify` can be compared directly — that difference is the signal. Currently:
-all 30 pass under `run-selftest.sh`, all 30 under `run-aot-selftest.sh verify`, and all 30 under
+all 31 pass under `run-selftest.sh`, all 31 under `run-aot-selftest.sh verify`, and all 31 under
 `run-aot-selftest.sh speed` — the static-target-backup defect that used to fail four `speed` cases is
 fixed by settling a static target off the resolution stub (see the last bullet in "Things that will
 bite you").
@@ -57,6 +57,7 @@ RuntimeCases                # boot-classpath target, chained hooks, install unde
 LookupCases                 # find_function: each kind, overload picking, misses, find-then-hook
 ArityCases                  # backups whose arguments spill past the ABI's registers
 LifecycleCases              # unhooking: restores the original, unwinds a chained hook one layer
+EarlyLinkCases              # a caller linked before ArtHooks loaded (MainActivity links it first)
 Benchmark                   # throughput, for costing disable_aot(); only runs for --ez benchmark
 ```
 
@@ -206,14 +207,30 @@ debuggable"*. Setting `Runtime::SetRuntimeDebugState(kJavaDebuggable)` therefore
 ART links afterwards take `GetQuickToInterpreterBridge()` instead, upgraded to nterp once verified,
 and every call goes through the `ArtMethod` again. `Runtime::DeoptimizeBootImage()` does the same
 for framework code that was already linked, and hands the JIT's non-debuggable code cache over.
+`Instrumentation::UpdateEntrypointsForDebuggable()` (Android 14+) then does it for every *other*
+already-linked class -- the same sequence as openjdkjvmti's `DeoptManager::FinishSetup()`. That step
+is not optional in practice: a `speed-profile` install ships an app image, and ART links every class
+in it, AOT bodies included, when the class loader opens, before any app code runs. On a Galaxy S25+
+that left an app's Compose card renderer running AOT copies of three hooked getters while every hook
+reported success; `EarlyLinkCases` reproduces it.
 
 Four properties of that design are deliberate:
 
 - **Only exported symbols, resolved by name.** `art::Runtime::instance_`, `SetRuntimeDebugState`,
-  `DeoptimizeBootImage` and `ScopedSuspendAll`'s constructor/destructor are all in libart.so's
-  `.dynsym` on API 36. Nothing indexes a runtime struct, because nothing here can measure one --
-  which is the same bargain as the `ArtMethod` layout. A platform that renames or hides one makes
-  `disable_aot()` return false and change nothing.
+  `DeoptimizeBootImage`, `UpdateEntrypointsForDebuggable` and `ScopedSuspendAll`'s
+  constructor/destructor are all in libart.so's `.dynsym` on API 36. Nothing indexes a runtime
+  struct, because nothing here can measure one -- which is the same bargain as the `ArtMethod`
+  layout. A platform that renames or hides one makes `disable_aot()` do less and log why.
+- **The `Instrumentation*` is read, not located.** `UpdateEntrypointsForDebuggable()` needs it as
+  `this`, and only the inline `Runtime::GetInstrumentation()` returns it. `DeoptimizeBootImage()`
+  passes it anyway, as the one member of the visitor it hands `ClassLinker::VisitClasses` -- and
+  libart calls its own exports through the PLT, so `find_libart_plt_slot()` finds the GOT slot that
+  call jumps through, and `drop_linked_aot_code()` points it at a pass-through for the duration
+  (only the calling thread's arguments are read). The value must then appear among `art::Runtime`'s
+  own leading words and be neither the Runtime nor the ClassLinker, or it is not used: a wrong
+  `this` there is a crash at app startup. Heap pointers are top-byte tagged on arm64, so
+  `find_mapping()` untags before comparing against `/proc/self/maps` -- without that, Runtime is "in
+  no mapping" and the step is refused.
 - **`dlopen` is not used and cannot be.** libart.so is not in `public.libraries.txt`, so an app's
   classloader namespace refuses to link it. `art_symbols.cpp` finds the already-mapped library with
   `dl_iterate_phdr` and walks its `DT_GNU_HASH`/`DT_SYMTAB` directly. libart is built
@@ -222,11 +239,17 @@ Four properties of that design are deliberate:
 - **`DeoptimizeBootImage()` needs the mutator lock held exclusively** (its visitor `DCHECK`s it), so
   it runs inside a `ScopedSuspendAll`. That is legal from a JNI method because the thread is in the
   native state and holds no mutator lock to deadlock against.
-- **It only governs classes ART has not linked yet.** A class already in use keeps its AOT bodies.
-  `warn_if_aot_compiled()` reports a target that is still on AOT code by classifying its entry point
-  against `/proc/self/maps`: ART's stubs are inside libart.so and JIT output is anonymous, so a
-  file-backed mapping that is not a `.so` is an oat file. That warning fires for the demo's own
-  `MainActivity.on_click`, because the activity is linked before `HookExample.on_load()` runs.
+- **On Android 13 it only governs classes ART has not linked yet** -- that libart has no
+  `UpdateEntrypointsForDebuggable()`, so a class already in use keeps its AOT bodies, and
+  `EarlyLinkCases` skips below API 34. `warn_if_aot_compiled()` reports a target that is still on AOT
+  code by classifying its entry point against `/proc/self/maps`: ART's stubs are inside libart.so and
+  JIT output is anonymous, so a file-backed mapping that is not a `.so` is an oat file. On API 34+
+  it should never fire; on 13 it fires for the demo's own `MainActivity.on_click`, because the
+  activity is linked before `HookExample.on_load()` runs.
+- **A static caller does not reproduce the early-link case.** ART parks a static method on the
+  resolution stub until its class is *visibly* initialized, a batched step that can land after the
+  debuggable flip and hand it nterp anyway. `EarlyLinkCases.read()` is an instance method for that
+  reason; the static version passed against the unfixed library.
 
 The JIT is a separate, already-solved case: `HInliner` also refuses a method where
 `!method->IsCompilable()`, which is exactly `kAccCompileDontBother`, so `discourage_compilation()`

@@ -17,9 +17,14 @@ struct Library {
     const ElfW(Sym) *symbols;
     const char *strings;
     const uint32_t *gnu_hash;
+    // The PLT's relocations (DT_JMPREL), their total size in bytes, and whether they are Rela or
+    // Rel entries (DT_PLTREL). Optional: only find_libart_plt_slot() needs them.
+    const void *plt_relocations;
+    size_t plt_relocations_size;
+    bool plt_relocations_are_rela;
 };
 
-Library g_libart = {0, nullptr, nullptr, nullptr};
+Library g_libart = {0, nullptr, nullptr, nullptr, nullptr, 0, false};
 bool g_looked_for_libart = false;
 
 /**
@@ -57,7 +62,7 @@ bool describe(const dl_phdr_info *info, Library *out) {
         return false;
     }
 
-    Library found = {info->dlpi_addr, nullptr, nullptr, nullptr};
+    Library found = {info->dlpi_addr, nullptr, nullptr, nullptr, nullptr, 0, false};
     for (const ElfW(Dyn) *entry = dynamic; entry->d_tag != DT_NULL; entry++) {
         switch (entry->d_tag) {
             case DT_SYMTAB:
@@ -71,6 +76,15 @@ bool describe(const dl_phdr_info *info, Library *out) {
             case DT_GNU_HASH:
                 found.gnu_hash = static_cast<const uint32_t *>(
                         resolve(info->dlpi_addr, entry->d_un.d_ptr));
+                break;
+            case DT_JMPREL:
+                found.plt_relocations = resolve(info->dlpi_addr, entry->d_un.d_ptr);
+                break;
+            case DT_PLTRELSZ:
+                found.plt_relocations_size = entry->d_un.d_val;
+                break;
+            case DT_PLTREL:
+                found.plt_relocations_are_rela = entry->d_un.d_val == DT_RELA;
                 break;
             default:
                 break;
@@ -167,4 +181,33 @@ void *find_libart_symbol(const char *name) {
         }
         index++;
     }
+}
+
+void **find_libart_plt_slot(const char *name) {
+    const Library *library = libart();
+    if (library == nullptr || library->plt_relocations == nullptr) {
+        return nullptr;
+    }
+
+    // Rel and Rela share their first two fields, r_offset and r_info, so one walk reads both and
+    // only the stride differs. Every DT_JMPREL entry is a jump slot (or, on some ABIs, an
+    // IRELATIVE/TLSDESC that names no symbol), so matching the symbol's name is the whole test.
+    const size_t stride = library->plt_relocations_are_rela ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    const auto *cursor = static_cast<const uint8_t *>(library->plt_relocations);
+    const uint8_t *end = cursor + library->plt_relocations_size;
+    for (; cursor + stride <= end; cursor += stride) {
+        const auto *relocation = reinterpret_cast<const ElfW(Rel) *>(cursor);
+#if defined(__LP64__)
+        const size_t symbol_index = ELF64_R_SYM(relocation->r_info);
+#else
+        const size_t symbol_index = ELF32_R_SYM(relocation->r_info);
+#endif
+        if (symbol_index == 0) {
+            continue;
+        }
+        if (strcmp(library->strings + library->symbols[symbol_index].st_name, name) == 0) {
+            return reinterpret_cast<void **>(library->bias + relocation->r_offset);
+        }
+    }
+    return nullptr;
 }

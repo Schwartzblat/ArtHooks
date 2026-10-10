@@ -164,15 +164,17 @@ bool install_backup(ArtMethod *backup, ArtMethod *target) {
  * refusal, but it is the one case where a hook reports success and does nothing.
  *
  * Two ways to be here: disable_aot_code() never ran (libart did not export what it needs, or
- * ArtHooks.KEEP_AOT_PROPERTY asked it not to), or it ran too late -- ART had already linked this
- * class, and it only governs classes linked afterwards.
+ * ArtHooks.KEEP_AOT_PROPERTY asked it not to), or it ran after ART had linked this class and could
+ * not move the classes already linked off their AOT code -- on Android 13, which lacks what that
+ * takes, or wherever init logged why not.
  */
 void warn_if_aot_compiled(ArtMethod *target) {
     if (!is_aot_code(get_entry_point(target))) {
         return;
     }
     if (aot_code_disabled()) {
-        LOGW("the target is on AOT code because ART linked its class before ArtHooks loaded -- a "
+        LOGW("the target is on AOT code because ART linked its class before ArtHooks loaded, and "
+             "ArtHooks could not move already-linked classes off it (see the warning at init) -- a "
              "caller dex2oat inlined it into will keep running the original body. Touch "
              "com.arthooks.ArtHooks earlier (Application.attachBaseContext is the usual place).");
     } else {

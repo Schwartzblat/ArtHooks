@@ -87,10 +87,13 @@ public class ArtHooks {
      * makes every class ART links afterwards run under nterp and dispatch through the
      * {@code ArtMethod} again.
      *
-     * <p><b>It only covers classes ART has not linked yet.</b> Touch this class as early as you
-     * can — {@code Application.attachBaseContext} is the usual place — so that it runs before the
-     * code you intend to hook, and that code's callers, are first loaded. A target still on AOT
-     * code when it is hooked is reported as a warning under the {@code ArtHooks} tag.
+     * <p>Classes ART had <em>already</em> linked are moved off their AOT code as well, the way ART
+     * does it when a debugger makes a running app debuggable. That matters more than it sounds: a
+     * {@code speed-profile} install ships an app image, and ART links every class in it, compiled
+     * code included, before any of the app's code runs. <b>On Android 13 this part is not
+     * available</b> and only classes ART has not linked yet are covered, so touch this class as
+     * early as you can — {@code Application.attachBaseContext} is the usual place. A target still
+     * on AOT code when it is hooked is reported as a warning under the {@code ArtHooks} tag.
      *
      * <p>The cost is process-wide: the app runs nterp plus JIT instead of AOT code, and while
      * debuggable the JIT compiles without inlining. Set {@link #KEEP_AOT_PROPERTY} to opt out of
